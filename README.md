@@ -1,2 +1,2 @@
-# oumi-rust
+# roumi
 Rust libraries for Oumi
