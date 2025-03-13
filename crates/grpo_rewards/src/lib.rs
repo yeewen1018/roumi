@@ -1,7 +1,9 @@
-use pyo3::{exceptions::PyValueError, prelude::*};
+use pyo3::types::PyDict;
+use pyo3::{exceptions::PyTypeError, exceptions::PyValueError, prelude::*};
+use std::collections::HashMap;
 
 trait Calculator: Send + Sync {
-    fn new() -> Self
+    fn new(params: HashMap<String, String>) -> Self
     where
         Self: Sized;
 
@@ -30,7 +32,7 @@ pub struct GrpoRewards {
 struct CompletionNegativeLengthCalculator;
 
 impl Calculator for CompletionNegativeLengthCalculator {
-    fn new() -> Self {
+    fn new(_params: HashMap<String, String>) -> Self {
         CompletionNegativeLengthCalculator
     }
 
@@ -47,10 +49,43 @@ impl Calculator for CompletionNegativeLengthCalculator {
     }
 }
 
+fn convert_pydict_to_str2str_map(
+    d: Option<&Bound<'_, PyDict>>,
+) -> anyhow::Result<HashMap<String, String>> {
+    if let Some(params) = d {
+        let mut x: HashMap<String, String> = HashMap::with_capacity(params.len());
+
+        for (key, value) in params.iter() {
+            let key: String = key
+                .str()
+                .map_err(|_| {
+                    PyTypeError::new_err("function_params's key is not convertible to string")
+                })?
+                .to_string();
+            let value: String = value
+                .str()
+                .map_err(|_| {
+                    PyTypeError::new_err("function_params's value is not convertible to string")
+                })?
+                .to_string();
+            x.insert(key, value);
+        }
+        Ok(x)
+    } else {
+        Ok(HashMap::new())
+    }
+}
+
 #[pymethods]
 impl GrpoRewards {
     #[new]
-    fn new(function_name: &str, prompts: Vec<String>, completions: Vec<String>) -> PyResult<Self> {
+    #[pyo3(signature = (function_name, prompts, completions, *, function_params=None))]
+    fn py_new(
+        function_name: &str,
+        prompts: Vec<String>,
+        completions: Vec<String>,
+        function_params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         if completions.is_empty() {
             return Err(PyValueError::new_err("Completions cannot be empty."));
         } else if !prompts.is_empty() && (prompts.len() != completions.len()) {
@@ -59,11 +94,15 @@ impl GrpoRewards {
             ));
         }
 
+        let internal_func_params = convert_pydict_to_str2str_map(function_params)?;
+
         // TODO Refactor into calculator builder function.
         let calculator: Box<dyn Calculator>;
         match function_name {
             "CompletionNegativeLengthCalculator" => {
-                calculator = Box::new(CompletionNegativeLengthCalculator::new())
+                calculator = Box::new(CompletionNegativeLengthCalculator::new(
+                    internal_func_params,
+                ))
             }
             _ => return Err(PyValueError::new_err("Unknown calculator.")),
         }
