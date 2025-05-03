@@ -85,12 +85,8 @@ impl Dataset for InMemoryDataset {
 #[cfg(test)]
 mod in_memory_dataset_tests {
     use super::*;
-    use crate::{
-        collator::{PaddingCollator, PaddingRule, StackCollator},
-        minibatch::MiniBatch,
-        sample::Sample,
-    };
-    use tch::{Device, Kind, Tensor};
+    use crate::sample::Sample;
+    use tch::{Kind, Tensor};
 
     // Helper functions for creating test data
     mod test_utils {
@@ -190,5 +186,104 @@ mod in_memory_dataset_tests {
         for t in threads {
             t.join().unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    use crate::{
+        collator::{PaddingCollator, PaddingRule, StackCollator},
+        minibatch::MiniBatch,
+        sample::Sample,
+    };
+    use tch::{Device, Kind, Tensor};
+
+    // Helper functions for creating test data
+    mod test_utils {
+        use super::*;
+
+        // Creates a sample with variable length features for padding tests
+        pub fn make_variable_length_sample(id: i64, len1: i64, len2: i64) -> Sample {
+            Sample::from_single(
+                "f1",
+                Tensor::from_slice(&vec![id; len1 as usize]).to_kind(Kind::Int64),
+            )
+            .with_feature(
+                "f2",
+                Tensor::from_slice(&vec![id + 1; len2 as usize]).to_kind(Kind::Int64),
+            )
+        }
+    }
+
+    #[test]
+    fn test_stack_collator_pipeline() -> anyhow::Result<()> {
+        let samples = vec![
+            Sample::from_single(
+                "input_ids",
+                Tensor::from_slice(&[1, 2, 3]).to_kind(Kind::Int64),
+            )
+            .with_feature("labels", Tensor::from_slice(&[1]).to_kind(Kind::Int64)),
+            Sample::from_single(
+                "input_ids",
+                Tensor::from_slice(&[4, 5, 6]).to_kind(Kind::Int64),
+            )
+            .with_feature("labels", Tensor::from_slice(&[0]).to_kind(Kind::Int64)),
+        ];
+
+        // Create dataset
+        let dataset = InMemoryDataset::new(samples);
+        assert_eq!(dataset.len(), Some(2));
+
+        // Create batch using stack collator
+        let all_samples: Vec<Sample> = dataset.iter().collect::<Result<Vec<_>>>()?;
+        let batch = MiniBatch::collate(all_samples, StackCollator)?;
+
+        // Validate batch
+        assert_eq!(batch.get("input_ids")?.size(), &[2, 3]);
+        assert_eq!(batch.get("labels")?.size(), &[2, 1]);
+
+        let expected_input_ids = Tensor::from_slice(&[1, 2, 3, 4, 5, 6]).reshape(&[2, 3]);
+        assert!(batch.get("input_ids")?.equal(&expected_input_ids));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_padding_collator_pipeline() -> Result<()> {
+        let samples = vec![
+            test_utils::make_variable_length_sample(1, 2, 4), // f1 len 2; f2 len 4
+            test_utils::make_variable_length_sample(2, 3, 2), // f1 len 3; f2 len 2
+            test_utils::make_variable_length_sample(3, 1, 1), // f1 len 1; f2 len 1
+        ];
+
+        // Create dataset
+        let dataset = InMemoryDataset::new(samples);
+
+        // Configure padding:
+        // - f1: pad to max length in batch
+        // - f2: pad to fixed length 5 with value -1.0
+        let collator = PaddingCollator::new()
+            .pad("f1", vec![(0, PaddingRule::MaxLength)], None)
+            .pad("f2", vec![(0, PaddingRule::FixedRight(5))], Some(-1.0));
+
+        // Create batch
+        let all_samples: Vec<_> = dataset.iter().collect::<Result<_>>()?;
+        let batch = MiniBatch::collate(all_samples, collator)?;
+
+        // Validate batch shapes
+        assert_eq!(batch.get("f1")?.size(), &[3, 3]); // max(2,3,1)=3
+        assert_eq!(batch.get("f2")?.size(), &[3, 5]); // fixed 5
+
+        // Validate padding value (The fourth element in "f2" of sample 1 should be -1.0)
+        assert_eq!(batch.get("f2")?.double_value(&[0, 4]), -1.0);
+
+        // Test device transfer
+        let cpu = batch.to_device(Device::Cpu);
+        let gpu = cpu.to_device(Device::cuda_if_available());
+        let cpu2 = gpu.to_device(Device::Cpu);
+        assert_eq!(cpu2.get("f1")?.size(), &[3, 3]);
+
+        Ok(())
     }
 }
