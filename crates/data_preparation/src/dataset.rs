@@ -81,3 +81,114 @@ impl Dataset for InMemoryDataset {
         Some(self.samples.len())
     }
 }
+
+#[cfg(test)]
+mod in_memory_dataset_tests {
+    use super::*;
+    use crate::{
+        collator::{PaddingCollator, PaddingRule, StackCollator},
+        minibatch::MiniBatch,
+        sample::Sample,
+    };
+    use tch::{Device, Kind, Tensor};
+
+    // Helper functions for creating test data
+    mod test_utils {
+        use super::*;
+
+        // Creates `n` test samples with predictable values
+        // - "input_ids": [i], "labels": [i % 2]
+        pub fn create_test_samples(n: usize) -> Vec<Sample> {
+            (0..n)
+                .map(|i| {
+                    Sample::from_single(
+                        "input_ids",
+                        Tensor::from_slice(&[i as i64]).to_kind(Kind::Int64),
+                    )
+                    .with_feature(
+                        "labels",
+                        Tensor::from_slice(&[(i as i64) % 2]).to_kind(Kind::Int64),
+                    )
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn test_creation() {
+        let samples = test_utils::create_test_samples(3);
+        let dataset = InMemoryDataset::new(samples);
+
+        assert_eq!(dataset.len(), Some(3));
+        assert!(!dataset.is_empty());
+    }
+
+    #[test]
+    fn test_iteration_and_random_access() {
+        let samples = test_utils::create_test_samples(2);
+        let dataset = InMemoryDataset::new(samples);
+
+        // iter
+        let mut it = dataset.iter();
+        let sample_0 = it.next().unwrap().unwrap();
+        let sample_1 = it.next().unwrap().unwrap();
+        assert!(it.next().is_none());
+        assert_eq!(sample_0.features["input_ids"].int64_value(&[0]), 0);
+        assert_eq!(sample_1.features["labels"].int64_value(&[0]), 1);
+
+        // get
+        let r = dataset.get(1).unwrap().unwrap();
+        assert_eq!(r.features["input_ids"].int64_value(&[0]), 1);
+        assert!(dataset.get(2).is_none());
+    }
+
+    #[test]
+    fn test_metadata_ops() {
+        let dataset = InMemoryDataset::new(test_utils::create_test_samples(1))
+            .with_metadata("source", "test");
+
+        assert_eq!(dataset.metadata("source"), Some("test"));
+        assert!(dataset.metadata("missing").is_none());
+    }
+
+    #[test]
+    fn test_concurrent_iter() {
+        let dataset = Arc::new(InMemoryDataset::new(test_utils::create_test_samples(100)));
+
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let dataset = dataset.clone();
+                std::thread::spawn(move || {
+                    for sample in dataset.iter() {
+                        let _ = sample.unwrap().features["input_ids"].int64_value(&[0]);
+                    }
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_concurrent_get() {
+        let dataset = Arc::new(InMemoryDataset::new(test_utils::create_test_samples(100)));
+
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let dataset = dataset.clone();
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        let sample = dataset.get(i).unwrap().unwrap();
+                        let _ = sample.features["input_ids"].int64_value(&[0]);
+                    }
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+}
