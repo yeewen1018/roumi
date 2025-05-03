@@ -1,4 +1,5 @@
 pub mod collator;
+pub mod dataset;
 pub mod minibatch;
 pub mod sample;
 

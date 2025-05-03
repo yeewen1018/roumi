@@ -19,6 +19,32 @@ pub struct Sample {
     pub features: HashMap<String, Tensor>,
 }
 
+/// Creates a shallow clone of the `Sample`
+impl Clone for Sample {
+    fn clone(&self) -> Self {
+        let features = self
+            .features
+            .iter()
+            .map(|(k, v)| (k.clone(), v.shallow_clone()))
+            .collect();
+        Self { features }
+    }
+}
+
+/// Safety:
+/// - `Send` is safe because:
+///    * `HashMap<String, Tensor>` is `Send` when both its components are:
+///    * `String` is inherently `Send`
+///    * `Tensor` is `Send` (as per tch-rs)
+///    * Therefore, moving `Sample` to another thread cannot introduce data races.
+/// - `Sync` is safe because:
+///    * `Sample` has no interior mutability
+///    * All tensor operations that modify data require a mutable `Tensor` handle,
+///      therefore we cannot mutate through just a shared `&Sample` reference.
+///    * Immutable tensor reads are thread-safe (as per tch-rs).
+unsafe impl Send for Sample {}
+unsafe impl Sync for Sample {}
+
 impl Sample {
     /// Creates a new `Sample` from a full feature map.
     ///
