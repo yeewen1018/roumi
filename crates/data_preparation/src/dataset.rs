@@ -20,10 +20,14 @@ pub trait Dataset: Send + Sync {
     /// Creates an iterator over all samples in the dataset.
     fn iter(&self) -> Self::Iter<'_>;
 
-    /// Retrieves a reference to a sample by index, if available.
-    fn get(&self, index: usize) -> Option<Result<&Sample>>;
+    /// Random-access lookup by index.
+    /// - In-memory datasets return `Ok(Some(&Sample))` or `Ok(None)` if out-of-bounds.
+    /// - Streaming datasets always return `Ok(None)`.
+    fn get(&self, index: usize) -> Result<Option<&Sample>>;
 
-    /// Returns total number of samples, if known.
+    /// Returns total number of samples.
+    /// - In-memory datasets return `Some(n)`.
+    /// - Streaming datasets return `None`.
     fn len(&self) -> Option<usize>;
 
     /// Checks if the dataset is empty.
@@ -35,7 +39,12 @@ pub trait Dataset: Send + Sync {
 /// A dataset that stores all samples in a contiguous memory
 /// with atomic-reference counting (`Arc<[Sample]>`).
 ///
-/// This enables cheap cloning, thread-safe sharing, and efficient batching.
+/// This enables:
+/// - Zero-copy clone: Cloning only bumps the `Arc` counter
+/// - Thread-safe sharing: Safe concurrent read access (`Send + Sync`)
+/// - Cache-efficient: Samples laid out back-to-back for efficient batching.
+///
+/// Ideal for datasets that comfortably fit into RAM.
 #[derive(Debug, Clone)]
 pub struct InMemoryDataset {
     samples: Arc<[Sample]>,
@@ -51,7 +60,8 @@ impl InMemoryDataset {
         }
     }
 
-    /// Adds/updates metadata and returns self (enables builder pattern).
+    /// Adds/updates metadata and returns the modified dataset.
+    /// Enables chaining: `dataset.with_metadata("source", "train")`.
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
@@ -73,8 +83,8 @@ impl Dataset for InMemoryDataset {
         self.samples.iter().cloned().map(Ok)
     }
 
-    fn get(&self, index: usize) -> Option<Result<&Sample>> {
-        self.samples.get(index).map(Ok)
+    fn get(&self, index: usize) -> Result<Option<&Sample>> {
+        Ok(self.samples.get(index))
     }
 
     fn len(&self) -> Option<usize> {
@@ -120,7 +130,7 @@ mod in_memory_dataset_tests {
     }
 
     #[test]
-    fn test_iteration_and_random_access() {
+    fn test_iteration_and_random_access() -> Result<()> {
         let samples = test_utils::create_test_samples(2);
         let dataset = InMemoryDataset::new(samples);
 
@@ -133,9 +143,10 @@ mod in_memory_dataset_tests {
         assert_eq!(sample_1.features["labels"].int64_value(&[0]), 1);
 
         // get
-        let r = dataset.get(1).unwrap().unwrap();
+        let r = dataset.get(1)?.unwrap();
         assert_eq!(r.features["input_ids"].int64_value(&[0]), 1);
-        assert!(dataset.get(2).is_none());
+        assert!(dataset.get(2)?.is_none());
+        Ok(())
     }
 
     #[test]
