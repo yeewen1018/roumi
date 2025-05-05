@@ -71,6 +71,18 @@ impl InMemoryDataset {
     pub fn metadata(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).map(|s| s.as_str())
     }
+
+    /// **(Opt-in via `boxed-iter` feature)**
+    /// Returns a heap-boxed iterator over owned `Sample`s.
+    /// The default `iter` uses static dispatch, but use this
+    /// when building runtime defined pipelines or passing iterators
+    /// as trait objects.
+    ///
+    /// Cost: one heap allocation per iterator creation.
+    #[cfg(feature = "boxed-iter")]
+    pub fn iter_boxed(&self) -> Box<dyn Iterator<Item = Result<Sample>> + Send + '_> {
+        Box::new(self.samples.iter().cloned().map(Ok))
+    }
 }
 
 impl Dataset for InMemoryDataset {
