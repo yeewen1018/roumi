@@ -19,21 +19,6 @@ pub trait Dataset: Send + Sync {
 
     /// Creates an iterator over all samples in the dataset.
     fn iter(&self) -> Self::Iter<'_>;
-
-    /// Random-access lookup by index.
-    /// - In-memory datasets return `Ok(Some(&Sample))` or `Ok(None)` if out-of-bounds.
-    /// - Streaming datasets always return `Ok(None)`.
-    fn get(&self, index: usize) -> Result<Option<&Sample>>;
-
-    /// Returns total number of samples.
-    /// - In-memory datasets return `Some(n)`.
-    /// - Streaming datasets return `None`.
-    fn len(&self) -> Option<usize>;
-
-    /// Checks if the dataset is empty.
-    fn is_empty(&self) -> bool {
-        self.len().map(|l| l == 0).unwrap_or(true)
-    }
 }
 
 /// A dataset that stores all samples in a contiguous memory
@@ -58,6 +43,21 @@ impl InMemoryDataset {
             samples: samples.into(),
             metadata: HashMap::new(),
         }
+    }
+
+    /// Random-access lookup by index
+    pub fn get(&self, index: usize) -> Result<Option<&Sample>> {
+        Ok(self.samples.get(index))
+    }
+
+    /// Returns total number of samples
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Checks if the dataset is empty
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
     }
 
     /// Adds/updates metadata and returns the modified dataset.
@@ -94,14 +94,6 @@ impl Dataset for InMemoryDataset {
     fn iter(&self) -> Self::Iter<'_> {
         self.samples.iter().cloned().map(Ok)
     }
-
-    fn get(&self, index: usize) -> Result<Option<&Sample>> {
-        Ok(self.samples.get(index))
-    }
-
-    fn len(&self) -> Option<usize> {
-        Some(self.samples.len())
-    }
 }
 
 #[cfg(test)]
@@ -137,7 +129,7 @@ mod in_memory_dataset_tests {
         let samples = test_utils::create_test_samples(3);
         let dataset = InMemoryDataset::new(samples);
 
-        assert_eq!(dataset.len(), Some(3));
+        assert_eq!(dataset.len(), 3);
         assert!(!dataset.is_empty());
     }
 
@@ -256,7 +248,7 @@ mod pipeline_tests {
 
         // Create dataset
         let dataset = InMemoryDataset::new(samples);
-        assert_eq!(dataset.len(), Some(2));
+        assert_eq!(dataset.len(), 2);
 
         // Create batch using stack collator
         let all_samples: Vec<Sample> = dataset.iter().collect::<Result<Vec<_>>>()?;
