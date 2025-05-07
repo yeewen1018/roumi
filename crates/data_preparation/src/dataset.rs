@@ -1,6 +1,7 @@
 use crate::sample::Sample;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A `Dataset` provides unified access to data samples.
@@ -21,6 +22,7 @@ pub trait Dataset: Send + Sync {
     fn iter(&self) -> Self::Iter<'_>;
 }
 
+/// =====================================================================
 /// A dataset that stores all samples in a contiguous memory
 /// with atomic-reference counting (`Arc<[Sample]>`).
 ///
@@ -93,6 +95,90 @@ impl Dataset for InMemoryDataset {
 
     fn iter(&self) -> Self::Iter<'_> {
         self.samples.iter().cloned().map(Ok)
+    }
+}
+
+/// =====================================================================
+/// Supported data source types
+#[derive(Debug, Clone)]
+pub enum DataSource {
+    File(PathBuf), // File-based data (e.g., JSONL, Parquet, etc.)
+    Database {
+        query: String,
+        connection_string: String,
+    }, // Database connection
+    Other,         // Add more sources: HTTP, etc.
+}
+
+impl DataSource {
+    /// Creates streaming iterator for this data source
+    pub fn stream_samples(&self) -> Result<Box<dyn Iterator<Item = Result<Sample>> + Send>> {
+        match self {
+            DataSource::File(path) => {
+                Err(anyhow!("File streaming not yet implemented for {:?}", path))
+            }
+            DataSource::Database {
+                query,
+                connection_string,
+            } => Err(anyhow!(
+                "Database not yet implemented: {} @ {}",
+                query,
+                connection_string
+            )),
+            DataSource::Other => Err(anyhow!(
+                "Streaming not yet implemented for this type of data source."
+            )),
+        }
+    }
+}
+
+/// The `IterableDataset` streams Samples on demand.
+/// - Yields samples sequentially.
+/// - No random access and length is unknown.
+#[derive(Debug, Clone)]
+pub struct IterableDataset {
+    data_sources: Arc<[DataSource]>,
+}
+
+impl IterableDataset {
+    /// Creates dataset from supported data sources.
+    pub fn new(data_sources: impl IntoIterator<Item = DataSource>) -> Self {
+        let vec: Vec<DataSource> = data_sources.into_iter().collect();
+        Self {
+            data_sources: Arc::from(vec),
+        }
+    }
+}
+
+impl Dataset for IterableDataset {
+    type Iter<'a>
+        = Box<dyn Iterator<Item = Result<Sample>> + Send + 'a>
+    where
+        Self: 'a;
+
+    /// Returns streaming iterator compatible with heterogeneous data sources.
+    fn iter(&self) -> Self::Iter<'_> {
+        Box::new(self.data_sources.iter().flat_map(|src| {
+            src.stream_samples()
+                .unwrap_or_else(|e| Box::new(std::iter::once(Err(e))))
+        }))
+    }
+}
+
+#[cfg(test)]
+mod iterable_dataset_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_example_usage() {
+        let ds = IterableDataset::new(vec![DataSource::File(PathBuf::from("x.json"))]);
+        let mut iter = ds.iter();
+        if let Some(Err(e)) = iter.next() {
+            assert!(e.to_string().contains("not yet implemented"));
+        } else {
+            panic!("Expected a streaming error for unimplemented source");
+        }
     }
 }
 
