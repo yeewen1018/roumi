@@ -10,7 +10,7 @@ use tch::{Device, Kind, Tensor};
 ///
 /// To run these, use:
 /// ```bash
-/// cargo bench --features boxed-iter
+/// cargo bench
 /// ```
 
 /// All tests sweep across dataset sizes from 1K to 1M samples.
@@ -38,21 +38,29 @@ fn bench_iteration(c: &mut Criterion) {
     let mut group = c.benchmark_group("Iteration Overhead");
 
     for &size in &SIZES {
-        let ds = make_dataset(size);
+        let dataset = make_dataset(size);
 
-        group.bench_with_input(BenchmarkId::new("static", size), &ds, |b, ds| {
-            b.iter(|| {
-                let cnt = ds.iter().count();
-                black_box(cnt);
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("static", size),
+            &dataset,
+            |bench, dataset| {
+                bench.iter(|| {
+                    let count = dataset.iter().count();
+                    black_box(count);
+                })
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("boxed", size), &ds, |b, ds| {
-            b.iter(|| {
-                let cnt = ds.iter_boxed().count();
-                black_box(cnt);
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("boxed", size),
+            &dataset,
+            |bench, dataset| {
+                bench.iter(|| {
+                    let count = dataset.iter_boxed().count();
+                    black_box(count);
+                })
+            },
+        );
     }
     group.finish();
 }
@@ -61,32 +69,42 @@ fn bench_iteration(c: &mut Criterion) {
 fn bench_with_processing(c: &mut Criterion) {
     let mut group = c.benchmark_group("With Processing");
     for &size in &SIZES {
-        let ds = make_dataset(size);
+        let dataset = make_dataset(size);
         group.throughput(Throughput::Elements(size as u64));
 
-        group.bench_with_input(BenchmarkId::new("static+map", size), &size, |b, &_s| {
-            b.iter(|| {
-                ds.iter()
-                    .map(|r| {
-                        let sample = r.unwrap();
-                        let t = sample.get("input_ids").unwrap() + 1;
-                        black_box(t)
-                    })
-                    .count()
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("static+map", size),
+            &size,
+            |bench, &_dataset_size| {
+                bench.iter(|| {
+                    dataset
+                        .iter()
+                        .map(|sample_result| {
+                            let sample = sample_result.unwrap();
+                            let processed_sample = sample.get("input_ids").unwrap() + 1;
+                            black_box(processed_sample)
+                        })
+                        .count()
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("boxed+map", size), &size, |b, &_s| {
-            b.iter(|| {
-                ds.iter_boxed()
-                    .map(|r| {
-                        let sample = r.unwrap();
-                        let t = sample.get("input_ids").unwrap() + 1;
-                        black_box(t)
-                    })
-                    .count()
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("boxed+map", size),
+            &size,
+            |bench, &_dataset_size| {
+                bench.iter(|| {
+                    dataset
+                        .iter_boxed()
+                        .map(|sample_result| {
+                            let sample = sample_result.unwrap();
+                            let processed_sample = sample.get("input_ids").unwrap() + 1;
+                            black_box(processed_sample)
+                        })
+                        .count()
+                });
+            },
+        );
     }
     group.finish();
 }
