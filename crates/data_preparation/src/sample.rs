@@ -32,16 +32,21 @@ impl Clone for Sample {
 }
 
 /// Safety:
-/// - `Send` is safe because:
-///    * `HashMap<String, Tensor>` is `Send` when both its components are:
-///    * `String` is inherently `Send`
-///    * `Tensor` is `Send` (as per tch-rs)
-///    * Therefore, moving `Sample` to another thread cannot introduce data races.
-/// - `Sync` is safe because:
-///    * `Sample` has no interior mutability
-///    * All tensor operations that modify data require a mutable `Tensor` handle,
-///      therefore we cannot mutate through just a shared `&Sample` reference.
-///    * Immutable tensor reads are thread-safe (as per tch-rs).
+/// The `unsafe impl` here indicates we manually verified thread-safety conditions.
+///
+/// - The `Send` implementation is safe because:
+/// 1. `tch::Tensor` is marked as `Send` in its source (see [tensor.rs])
+/// 2. `HashMap<String, Tensor>` composes only `Send` types:
+///    * `String` is `Send` (standard library guarantee)
+///    * `Tensor` is `Send` (as verified in tch-rs source)
+///    * `HashMap` is `Send` when its key/value are `Send`
+///
+/// - The `Sync` implementation is safe because:
+/// 1. `tch::Tensor` is marked as `Sync` in its source
+/// 2. All operations require `&mut self` for mutation
+/// 3. Immutable references allow concurrent reads.
+///
+/// [tensor.rs]: https://docs.rs/tch/latest/src/tch/wrappers/tensor.rs.html
 unsafe impl Send for Sample {}
 unsafe impl Sync for Sample {}
 
