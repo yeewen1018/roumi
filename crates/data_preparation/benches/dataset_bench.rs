@@ -47,7 +47,6 @@ fn bench_iteration(c: &mut Criterion) {
             })
         });
 
-        #[cfg(feature = "boxed-iter")]
         group.bench_with_input(BenchmarkId::new("boxed", size), &ds, |b, ds| {
             b.iter(|| {
                 let cnt = ds.iter_boxed().count();
@@ -77,7 +76,6 @@ fn bench_with_processing(c: &mut Criterion) {
             });
         });
 
-        #[cfg(feature = "boxed-iter")]
         group.bench_with_input(BenchmarkId::new("boxed+map", size), &size, |b, &_s| {
             b.iter(|| {
                 ds.iter_boxed()

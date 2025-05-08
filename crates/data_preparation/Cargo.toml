@@ -11,9 +11,6 @@ description.workspace = true
 tch = "0.15.0"
 anyhow = "1.0"
 
-[features]
-boxed-iter = []
-
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.3.0"
