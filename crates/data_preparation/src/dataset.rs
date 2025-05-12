@@ -75,14 +75,12 @@ where
     }
 
     /// Attaches a transform to convert `Raw` -> `Sample`.
-    pub fn with_transform<T>(self, transform: T) -> Self
+    pub fn with_transform<T>(mut self, transform: T) -> Self
     where
         T: Transform<Raw, Sample> + Send + Sync + 'static,
     {
-        Self {
-            transform: Some(Arc::new(transform)),
-            ..self
-        }
+        self.transform = Some(Arc::new(transform));
+        self
     }
 
     /// Number of raw data stored.
@@ -118,7 +116,111 @@ where
                 let transform = Arc::clone(transform);
                 Box::new(base.map(move |raw| transform.apply(raw)))
             }
-            None => Box::new(base.map(|_| Err(anyhow!("No transform attached. Use `.with_transform()` to specify how to convert raw data into Sample")))),
+            None => Box::new(base.map(|_| {
+                Err(anyhow!(
+                    "No transform attached. Use `.with_transform()` to specify how to convert raw data into Sample"
+                ))
+            })),
+        }
+    }
+}
+
+/// -------------------------------------------------------------------------------------
+/// DataSource Trait
+///
+/// Abstraction for streaming un-processed records (`Raw`) from any backend (files, databases,
+/// HTTP, etc.).
+///
+/// # Example
+/// ```ignore
+/// // A toy source that emits the numbers 0..10 as Raw = i32
+/// struct DummySource;
+///
+/// impl DataSource<i32> for DummySource {
+///     fn stream(&self) -> Result<Box<dyn Iterator<Item = Result<i32>> + Send>> {
+///         // stream 0,1,2,...,9
+///         let iter = (0..10).map(Ok);
+///         Ok(Box::new(iter))
+///     }
+/// }
+/// ```
+pub trait DataSource<Raw>: Send + Sync {
+    /// Returns an iterator over raw records.
+    fn stream(&self) -> Result<Box<dyn Iterator<Item = Result<Raw>> + Send>>;
+}
+
+/// -------------------------------------------------------------------------------------
+/// Iterable Dataset
+///
+/// Streams `Raw` items from one or more `DataSource<Raw>`s, then applies an optional
+/// preprocessing pipeline to convert them into model-ready `Sample`s. Sharding supported
+/// via [`Sampler`].
+///
+/// # Example
+/// ```ignore
+/// let ds = IterableDataset::new(vec![Box::new(JsonlSource::new("data.jsonl"))])
+///     .with_transform(MyJsonToSampleTransform);
+/// ```
+#[derive(Clone)]
+pub struct IterableDataset<Raw> {
+    // List of sources
+    data_sources: Arc<[Box<dyn DataSource<Raw>>]>,
+
+    // Optional preprocessing pipeline: Raw -> Sample
+    transform: Option<Arc<dyn Transform<Raw, Sample> + Send + Sync>>,
+}
+
+impl<Raw> IterableDataset<Raw>
+where
+    Raw: Send + Sync + 'static,
+{
+    /// Creates a dataset from data sources (files, databases, etc. )
+    pub fn new<S>(data_sources: S) -> Self
+    where
+        S: IntoIterator<Item = Box<dyn DataSource<Raw>>>,
+    {
+        Self {
+            data_sources: data_sources
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+                .into(),
+            transform: None,
+        }
+    }
+
+    /// Attaches a preprocessing pipeline to convert `Raw` -> `Sample`.
+    pub fn with_transform<T>(mut self, transform: T) -> Self
+    where
+        T: Transform<Raw, Sample> + Send + Sync + 'static,
+    {
+        self.transform = Some(Arc::new(transform));
+        self
+    }
+}
+
+impl<Raw> Dataset for IterableDataset<Raw>
+where
+    Raw: Send + Sync + 'static,
+{
+    fn iter(&self) -> Box<dyn Iterator<Item = Result<Sample>> + Send + '_> {
+        let raw_stream = self.data_sources.iter().flat_map(|data_source| {
+            data_source
+                .stream()
+                .unwrap_or_else(|e| Box::new(std::iter::once(Err(e))))
+        });
+
+        // Apply transform or error out
+        match &self.transform {
+            Some(transform) => {
+                let transform = Arc::clone(transform);
+                Box::new(raw_stream.map(move |r| r.and_then(|raw| transform.apply(raw))))
+            }
+            None => Box::new(raw_stream.map(|_| {
+                Err(anyhow!(
+                    "No transform attached. Use `.with_transform()` to specify how to convert raw data into Sample"
+                ))
+            })),
         }
     }
 }
@@ -128,7 +230,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::PathBuf;
     use tch::Tensor;
+    use tempfile::NamedTempFile;
 
     // Shared test utilities
     struct Tokenizer;
@@ -162,6 +268,49 @@ mod tests {
             sample.get("length")?.int64_value(&[0]),
             "world".len() as i64
         );
+        Ok(())
+    }
+
+    // -----------IterableDataset Tests ------------------------
+    /// A simple DataSource<String> that streams lines from a file.
+    #[derive(Clone)]
+    struct FileSource {
+        path: PathBuf,
+    }
+
+    impl FileSource {
+        fn new(path: PathBuf) -> Self {
+            Self { path }
+        }
+    }
+
+    impl DataSource<String> for FileSource {
+        fn stream(&self) -> Result<Box<dyn Iterator<Item = Result<String>> + Send>> {
+            let file = File::open(&self.path)?;
+            let reader = BufReader::new(file);
+            // Each line ⇒ Ok(String)
+            let iter = reader.lines().map(|l| l.map_err(Into::into));
+            Ok(Box::new(iter))
+        }
+    }
+
+    #[test]
+    fn test_iterable_from_file_source() -> Result<()> {
+        let mut tmp = NamedTempFile::new()?;
+        writeln!(tmp, "line1")?;
+        writeln!(tmp, "line2")?;
+        writeln!(tmp, "line3")?;
+
+        let src = FileSource::new(tmp.path().to_path_buf());
+        let boxed_src: Box<dyn DataSource<String>> = Box::new(src);
+        let dataset = IterableDataset::new([boxed_src]).with_transform(Tokenizer);
+
+        let lengths: Vec<i64> = dataset
+            .iter()
+            .map(|s| s.unwrap().get("length").unwrap().int64_value(&[0]))
+            .collect();
+
+        assert_eq!(lengths, vec![5, 5, 5]);
         Ok(())
     }
 }
