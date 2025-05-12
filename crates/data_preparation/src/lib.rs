@@ -5,6 +5,5 @@ pub mod sample;
 
 pub use collator::StackCollator;
 pub use dataset::Dataset;
-pub use dataset::InMemoryDataset;
 pub use minibatch::MiniBatch;
 pub use sample::Sample;
