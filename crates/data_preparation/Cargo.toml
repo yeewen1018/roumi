@@ -15,6 +15,3 @@ anyhow = "1.0"
 criterion = "0.5"
 tempfile = "3.3.0"
 
-[[bench]]
-name = "dataset_bench"
-harness = false
