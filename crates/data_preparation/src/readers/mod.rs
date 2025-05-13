@@ -1,5 +1,5 @@
+pub mod jsonl;
 pub mod txt;
-pub mod jsonl;  
 
-pub use txt::TxtSource; 
-pub use jsonl::JsonlSource; 
+pub use jsonl::JsonlSource;
+pub use txt::TxtSource;
