@@ -15,6 +15,7 @@ serde_json = "1.0"
 walkdir = "2"
 arrow = "54.3.1"
 parquet = { version = "54.3.1", features = ["arrow"] }
+safetensors = "0.5.3"
 
 [dev-dependencies]
 criterion = "0.5"
