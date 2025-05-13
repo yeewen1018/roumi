@@ -44,67 +44,7 @@ impl ParquetSource {
         }
     }
 }
-/*
 
-impl DataSource<RecordBatch> for ParquetSource {
-    /// Stream RecordBatches from the Parquet file.
-    ///
-    /// # Errors
-    /// 1. Yields per-batch errors for corrupt row groups.
-    /// 2. Fails immediately if:
-    /// - File does not exist or is not a valid Parquet
-    /// - Requested columns do not exist
-    fn stream(&self) -> Result<Box<dyn Iterator<Item = Result<RecordBatch>> + Send>> {
-        let file = std::fs::File::open(&self.path)
-            .with_context(|| format!("Failed to open Parquet file: {}", self.path.display()))?;
-
-        // Configure batch size
-        let props = ReaderProperties::builder()
-            .with_batch_size(self.batch_size)
-            .build();
-
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, props)
-            .with_context(|| format!("Not a valid Parquet file: {}", self.path.display()))?;
-
-        // Apply column projection if specified (for reading only selected columns)
-        if !self.projection.is_empty() {
-
-            let field_indices: Vec<usize> = builder.schema()
-                .fields()
-                .iter()
-                .enumerate()
-                // Keep only fields that match our projection list
-                .filter(|(_, field_def)|{
-                    self.projection.contains(&field_def.name().to_string())
-                })
-                // Extract the field indices (Parquet needs numeric indices)
-                .map(|(field_index, _)|field_index)
-                .collect();
-
-            // Create the projection mask
-            let projection_mask = ProjectionMask::roots(
-                builder.parquet_schema(),
-                field_indices
-            );
-            builder = builder.with_projection(projection_mask);
-
-            // Verify the projection was valid
-            let valid_columns: Vec<_> = builder.schema().fields().iter()
-                .map(|f| f.name().to_string())
-                .collect();
-            if field_indices.is_empty() {
-                return Err(anyhow!(
-                    "Invalid projection columns. Available: {:?}, Requested: {:?}",
-                    valid_columns,
-                    self.projection
-                ));
-            }
-        }
-        Ok(Box::new(builder.build()?.into_iter().map(|batch| Ok(batch?))))
-    }
-}
-
-*/
 impl DataSource<RecordBatch> for ParquetSource {
     /// Stream RecordBatches from the Parquet file.
     ///
