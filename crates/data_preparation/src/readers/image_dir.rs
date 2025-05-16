@@ -1,5 +1,5 @@
 use crate::dataset::DataSource;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -58,50 +58,55 @@ impl DataSource<PathBuf> for ImageDirSource {
         // Build iterator.
         // - recurse = true: traverse all subdirectories, retrieve all images in nested folders.
         // - recurse = false: only scan the top-level directory, skipping subdirectories.
-        let path_iter: Box<dyn Iterator<Item = PathBuf> + Send> = if self.recurse {
-            Box::new(
-                WalkDir::new(&self.dir_path)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .map(|entry| entry.path().to_path_buf()),
-            )
+        let path_iter: Box<dyn Iterator<Item = Result<PathBuf>> + Send> = if self.recurse {
+            Box::new(WalkDir::new(&self.dir_path).into_iter().map(|entry| {
+                entry
+                    .map(|e| e.path().to_path_buf())
+                    .map_err(|e| anyhow!("Failed to read directory entry: {}", e))
+            }))
         } else {
-            Box::new(
-                fs::read_dir(&self.dir_path)?
-                    .filter_map(|e| e.ok())
-                    .map(|entry| entry.path()),
-            )
+            Box::new(fs::read_dir(&self.dir_path)?.map(|entry| {
+                entry
+                    .map(|e| e.path())
+                    .map_err(|e| anyhow!("Failed to read directory entry: {}", e))
+            }))
         };
 
         // Filter out symlinks, non-files, and unreadable files
-        let iter = path_iter
-            .filter(|path| {
+        let iter = path_iter.filter_map(move |path_result| match path_result {
+            Ok(path) => {
                 if path.is_symlink() {
-                    return false;
+                    return None;
                 }
-                path.metadata().map(|m| m.is_file()).unwrap_or(false)
-            })
-            .filter_map(move |path| {
-                // Extension check (case-insensitive)
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_lowercase());
 
-                // Verify readability by opening file once.
-                if let Some(ext) = ext {
-                    if extensions.contains(&ext) {
-                        // Verify readability by opening once.
-                        return match fs::File::open(&path) {
-                            Ok(_) => Some(Ok(path)),
-                            Err(e) => Some(Err(e).with_context(|| {
-                                format!("File exists but cannot be opened: {}", path.display())
-                            })),
-                        };
+                match path.metadata() {
+                    Ok(metadata) if metadata.is_file() => {
+                        // Extension check (case-insensitive)
+                        let extension_matches = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map_or(false, |e| extensions.contains(&e.to_lowercase()));
+
+                        if extension_matches {
+                            // Verify readability by opening file once
+                            match fs::File::open(&path) {
+                                Ok(_) => Some(Ok(path)),
+                                Err(e) => Some(Err(e).with_context(|| {
+                                    format!("File exists but cannot be opened: {}", path.display())
+                                })),
+                            }
+                        } else {
+                            None
+                        }
                     }
+                    Ok(_) => None, // Not a regular file
+                    Err(e) => Some(Err(e).with_context(|| {
+                        format!("Failed to get metadata for: {}", path.display())
+                    })),
                 }
-                None
-            });
+            }
+            Err(e) => Some(Err(e)),
+        });
         Ok(Box::new(iter))
     }
 }
