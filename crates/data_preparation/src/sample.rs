@@ -19,6 +19,37 @@ pub struct Sample {
     pub features: HashMap<String, Tensor>,
 }
 
+/// Creates a shallow clone of the `Sample`
+impl Clone for Sample {
+    fn clone(&self) -> Self {
+        let features = self
+            .features
+            .iter()
+            .map(|(k, v)| (k.clone(), v.shallow_clone()))
+            .collect();
+        Self { features }
+    }
+}
+
+/// Safety:
+/// The `unsafe impl` here indicates we manually verified thread-safety conditions.
+///
+/// - The `Send` implementation is safe because:
+/// 1. `tch::Tensor` is marked as `Send` in its source (see [tensor.rs])
+/// 2. `HashMap<String, Tensor>` composes only `Send` types:
+///    * `String` is `Send` (standard library guarantee)
+///    * `Tensor` is `Send` (as verified in tch-rs source)
+///    * `HashMap` is `Send` when its key/value are `Send`
+///
+/// - The `Sync` implementation is safe because:
+/// 1. `tch::Tensor` is marked as `Sync` in its source
+/// 2. All operations require `&mut self` for mutation
+/// 3. Immutable references allow concurrent reads.
+///
+/// [tensor.rs]: https://docs.rs/tch/latest/src/tch/wrappers/tensor.rs.html
+unsafe impl Send for Sample {}
+unsafe impl Sync for Sample {}
+
 impl Sample {
     /// Creates a new `Sample` from a full feature map.
     ///
