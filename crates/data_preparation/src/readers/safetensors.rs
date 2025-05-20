@@ -1,6 +1,10 @@
 use crate::dataset::DataSource;
-use anyhow::{Context, Result};
-use safetensors::SafeTensors;
+use anyhow::{bail, Context, Result};
+use bytemuck::cast_slice;
+use safetensors::{
+    tensor::{Dtype, TensorView},
+    SafeTensors,
+};
 use std::{collections::HashMap, fs, iter, path::PathBuf};
 use tch::Tensor;
 
@@ -52,15 +56,7 @@ impl SafetensorsSource {
         let mut tensors = HashMap::new();
 
         for (tensor_name, tensor_view) in safetensors.tensors() {
-            let shape: Vec<i64> = tensor_view
-                .shape()
-                .iter()
-                .map(|&dimension| dimension as i64)
-                .collect();
-            tensors.insert(
-                tensor_name.to_string(),
-                Tensor::from_slice(tensor_view.data()).reshape(&shape),
-            );
+            tensors.insert(tensor_name.to_string(), tensor_from_view(&tensor_view)?);
         }
         Ok(tensors)
     }
@@ -91,19 +87,35 @@ impl DataSource<HashMap<String, Tensor>> for SafetensorsSource {
                 // Reconstruct SafeTensors for each item (lightweight operation)
                 let st = SafeTensors::deserialize(&file_bytes).unwrap();
                 let view = st.tensor(&name)?;
-                let shape: Vec<i64> = view.shape().iter().map(|&d| d as i64).collect();
-                Ok(HashMap::from([(
-                    name,
-                    Tensor::from_slice(view.data()).reshape(&shape),
-                )]))
+                let tensor = tensor_from_view(&view)?;
+                Ok(HashMap::from([(name, tensor)]))
             })))
         }
     }
 }
 
+fn tensor_from_view(view: &TensorView<'_>) -> Result<Tensor> {
+    let shape: Vec<i64> = view.shape().iter().map(|&d| d as i64).collect();
+    let raw = view.data();
+    let tensor = match view.dtype() {
+        Dtype::U8 => Tensor::from_slice(raw),
+        Dtype::I8 => Tensor::from_slice(cast_slice::<u8, i8>(raw)),
+        Dtype::I16 => Tensor::from_slice(cast_slice::<u8, i16>(raw)),
+        Dtype::I32 => Tensor::from_slice(cast_slice::<u8, i32>(raw)),
+        Dtype::I64 => Tensor::from_slice(cast_slice::<u8, i64>(raw)),
+        Dtype::F32 => Tensor::from_slice(cast_slice::<u8, f32>(raw)),
+        Dtype::F64 => Tensor::from_slice(cast_slice::<u8, f64>(raw)),
+        Dtype::U32 | Dtype::U64 => bail!("U32/U64 not supported by tch tensor; will need to be converted to a supported type (e.g., I64) first"),
+        Dtype::F16 | Dtype::BF16 => bail!("F16/BF16 not supported; will need to be converted to F32"),
+        other => bail!("Unsupported dtype {:?}", other),
+    };
+    Ok(tensor.reshape(&shape))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use safetensors::serialize_to_file;
     use std::fs;
     use tempfile::NamedTempFile;
 
@@ -142,6 +154,65 @@ mod tests {
         let t = &tensors["weight"];
         assert_eq!(t.size(), &[8]); // 8 elements, one dimension
 
+        Ok(())
+    }
+
+    // Helper function for test mixed dtype tensors
+    fn create_test_tensor(dtype: Dtype, shape: &[usize]) -> Result<TensorView<'static>> {
+        let total_size: usize = shape.iter().product();
+        let bytes: Vec<u8> = match dtype {
+            Dtype::F32 => cast_slice(&vec![1.0f32; total_size]).to_vec(),
+            Dtype::I64 => cast_slice(&vec![42i64; total_size]).to_vec(),
+            Dtype::F64 => cast_slice(&vec![3.14f64; total_size]).to_vec(),
+            _ => bail!("Unsupported dtype for test"),
+        };
+        let leaked_bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        Ok(TensorView::new(dtype, shape.to_vec(), leaked_bytes)?)
+    }
+
+    #[test]
+    fn test_safetensors_source_stream_mixed_dtype_tensors() -> Result<()> {
+        // 1. Create a test safetensors file with multiple dtypes
+        let temp_file = NamedTempFile::new()?;
+        let path = temp_file.path();
+
+        let test_tensors = vec![
+            ("float32", create_test_tensor(Dtype::F32, &[2, 3])?),
+            ("int64", create_test_tensor(Dtype::I64, &[1, 5])?),
+            ("float64", create_test_tensor(Dtype::F64, &[3, 2])?),
+        ];
+
+        serialize_to_file(test_tensors.into_iter(), &None, path)?;
+
+        // 2. Test streaming mode
+        let source = SafetensorsSource::new(path).load_all_at_once(false);
+
+        let mut stream = source.stream()?;
+        let mut found_tensors = 0;
+
+        while let Some(batch) = stream.next() {
+            let tensor_map = batch?;
+            for (name, tensor) in tensor_map {
+                match name.as_str() {
+                    "float32" => {
+                        assert_eq!(tensor.kind(), tch::Kind::Float);
+                        assert_eq!(tensor.size(), vec![2, 3]);
+                    }
+                    "int64" => {
+                        assert_eq!(tensor.kind(), tch::Kind::Int64);
+                        assert_eq!(tensor.size(), vec![1, 5]);
+                    }
+                    "float64" => {
+                        assert_eq!(tensor.kind(), tch::Kind::Double);
+                        assert_eq!(tensor.size(), vec![3, 2]);
+                    }
+                    _ => panic!("Unexpected tensor name"),
+                }
+                found_tensors += 1;
+            }
+        }
+
+        assert_eq!(found_tensors, 3);
         Ok(())
     }
 }
