@@ -5,7 +5,7 @@ use safetensors::{
     tensor::{Dtype, TensorView},
     SafeTensors,
 };
-use std::{collections::HashMap, fs, iter, path::PathBuf};
+use std::{collections::HashMap, fs, iter, path::PathBuf, sync::Arc};
 use tch::Tensor;
 
 /// Reads safetensors files with the option for loading all tensors at once
@@ -53,47 +53,60 @@ impl SafetensorsSource {
             .with_context(|| format!("Failed to read safetensors file: {}", self.path.display()))?;
 
         let safetensors = SafeTensors::deserialize(&file_bytes)?;
-        let mut tensors = HashMap::new();
+        let mut tensors = HashMap::with_capacity(safetensors.tensors().len());
 
         for (tensor_name, tensor_view) in safetensors.tensors() {
-            tensors.insert(tensor_name.to_string(), tensor_from_view(&tensor_view)?);
+            tensors.insert(
+                tensor_name.to_string(),
+                tensor_from_view(&tensor_view)
+                    .with_context(|| format!("Failed to convert tensor '{}'", tensor_name))?,
+            );
         }
         Ok(tensors)
     }
 }
 
-/// !Note: Re-parses the header for each tensor. Small overhead here.
-/// Will optimize later if benchmark results show that this is a bottleneck.
 impl DataSource<HashMap<String, Tensor>> for SafetensorsSource {
     fn stream(&self) -> Result<Box<dyn Iterator<Item = Result<HashMap<String, Tensor>>> + Send>> {
         if self.load_all_at_once {
             // Load all tensors at once
             let tensor_map = self.load()?;
-            let tensor_values: Vec<_> = tensor_map.values().collect();
-            let stacked_map =
-                HashMap::from([("all_tensors".to_string(), Tensor::stack(&tensor_values, 0))]);
-            Ok(Box::new(iter::once(Ok(stacked_map))))
+            Ok(Box::new(iter::once(Ok(tensor_map))))
         } else {
             // Streaming mode
-            let file_bytes = fs::read(&self.path)?;
+            let file_bytes = Arc::new(fs::read(&self.path)?);
             let safetensors = SafeTensors::deserialize(&file_bytes)?;
-            let names = safetensors
-                .names()
-                .iter()
-                .map(|s| s.to_string())
+            let tensor_info = safetensors
+                .tensors()
+                .into_iter()
+                .map(|(name, view)| (name.to_string(), view.shape().to_vec(), view.dtype()))
                 .collect::<Vec<_>>();
 
-            Ok(Box::new(names.into_iter().map(move |name| {
-                // Reconstruct SafeTensors for each item (lightweight operation)
-                let st = SafeTensors::deserialize(&file_bytes).unwrap();
-                let view = st.tensor(&name)?;
-                let tensor = tensor_from_view(&view)?;
-                Ok(HashMap::from([(name, tensor)]))
-            })))
+            let file_bytes_clone = file_bytes.clone();
+            Ok(Box::new(tensor_info.into_iter().map(
+                move |(name, _shape, _dtype)| {
+                    let st = SafeTensors::deserialize(&file_bytes_clone)
+                        .map_err(|e| anyhow::anyhow!(
+                            "Failed to re-parse safetensors metadata (file may be corrupt or modified concurrently): {e}"
+                        ))?;
+                    let view = st.tensor(&name)
+                        .map_err(|e| anyhow::anyhow!(
+                            "Failed to access tensor '{}' during streaming: {}",
+                            name,
+                            e
+                        ))?;
+                    tensor_from_view(&view)
+                        .map(|tensor| HashMap::from([(name.clone(), tensor)]))
+                        .with_context(|| format!("Failed to convert tensor {}", name))
+                },
+            )))
         }
     }
 }
 
+/// Converts a TensorView to a tch::Tensor.
+/// Supported dtypes: U8, I8, I16, I32, I64, F32, F64.
+/// Unsupported: U32, U64, F16, BF16 (require conversion first).
 fn tensor_from_view(view: &TensorView<'_>) -> Result<Tensor> {
     let shape: Vec<i64> = view.shape().iter().map(|&d| d as i64).collect();
     let raw = view.data();
@@ -105,9 +118,25 @@ fn tensor_from_view(view: &TensorView<'_>) -> Result<Tensor> {
         Dtype::I64 => Tensor::from_slice(cast_slice::<u8, i64>(raw)),
         Dtype::F32 => Tensor::from_slice(cast_slice::<u8, f32>(raw)),
         Dtype::F64 => Tensor::from_slice(cast_slice::<u8, f64>(raw)),
-        Dtype::U32 | Dtype::U64 => bail!("U32/U64 not supported by tch tensor; will need to be converted to a supported type (e.g., I64) first"),
-        Dtype::F16 | Dtype::BF16 => bail!("F16/BF16 not supported; will need to be converted to F32"),
-        other => bail!("Unsupported dtype {:?}", other),
+        Dtype::U32 | Dtype::U64 => bail!(
+            "Unsigned 32/64-bit tensors are not supported by libtorch. \
+             Please convert to signed equivalent (e.g., I32/I64) before loading. \
+             Offending tensor shape: {:?}, dtype: {:?}",
+            shape,
+            view.dtype()
+        ),
+        Dtype::F16 | Dtype::BF16 => bail!(
+            "Half-precision floats (F16/BF16) are not supported. \
+             Convert to F32 before loading. \
+             Offending tensor shape: {:?}",
+            shape
+        ),
+        other => bail!(
+            "Unsupported dtype '{:?}'. Supported dtypes: U8, I8, I16, I32, I64, F32, F64. \
+             Tensor shape: {:?}",
+            other,
+            shape
+        ),
     };
     Ok(tensor.reshape(&shape))
 }
