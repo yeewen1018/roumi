@@ -1,11 +1,13 @@
 pub mod core;
+pub mod multimodal;
 pub mod text;
 pub mod vision;
 
 pub use core::Transform;
+pub use multimodal::MultimodalPipeline;
 
-use crate::sample::Sample;
 /// ===========================================================================
+use crate::sample::Sample;
 use anyhow::Result;
 use tch::Tensor;
 /// Converts a tensor to a `Sample` with specified feature name
