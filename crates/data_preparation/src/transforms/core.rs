@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 /// Note: `then()` works only when:
 /// 1. **Types align**: `self: Transform<I, O>`, `next: Transform<O, M>`
 /// 2. **Owned**: `Self::Sized` (no trait objects, must be concrete)
-/// 3. **Thread-safe**: `O: Send + Sync`
+/// 3. **Thread-safe**: intermediate and output types must be `Send`
 pub trait Transform<I, O>: Send + Sync {
     /// Applies the transformation to the input
     fn apply(&self, input: I) -> Result<O>;
@@ -21,12 +21,13 @@ pub trait Transform<I, O>: Send + Sync {
     where
         Self: Sized,
         T: Transform<O, M>,
-        O: Send + Sync,
+        O: Send,
+        M: Send,
     {
         Chain {
             first: self,
             second: next,
-            _marker: PhantomData::<O>,
+            _marker: PhantomData,
         }
     }
 }
@@ -37,7 +38,7 @@ pub trait Transform<I, O>: Send + Sync {
 pub struct Chain<A, B, M> {
     first: A,
     second: B,
-    _marker: PhantomData<M>,
+    _marker: PhantomData<fn() -> M>,
 }
 
 impl<A, B, M> Chain<A, B, M> {
@@ -58,7 +59,7 @@ impl<I, M, O, A, B> Transform<I, O> for Chain<A, B, M>
 where
     A: Transform<I, M>,
     B: Transform<M, O>,
-    M: Send + Sync,
+    M: Send,
 {
     fn apply(&self, input: I) -> Result<O> {
         self.first

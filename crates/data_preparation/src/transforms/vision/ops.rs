@@ -236,6 +236,7 @@ impl Transform<Tensor, Tensor> for Normalize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transforms::Transform;
     use image::{Rgb, RgbImage};
     use tch::{Device, Kind, Tensor};
 
@@ -303,6 +304,19 @@ mod tests {
 
         // After flip, left should be blue, right should be red:
         assert_eq!(flipped.as_bytes(), &[0, 0, 255, 255, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_vision_transforms_chaining() -> Result<()> {
+        let pipeline = Resize::new(16, 16, FilterType::Nearest)?
+            .then(RandomHorizontalFlip::new(0.0)?) // No flip
+            .then(ToTensor)
+            .then(Normalize::imagenet());
+        let img = test_rgb_image();
+        let tensor = pipeline.apply(img)?;
+        assert_eq!(tensor.size(), vec![3, 16, 16]);
+        assert_eq!(tensor.kind(), Kind::Float);
         Ok(())
     }
 }
