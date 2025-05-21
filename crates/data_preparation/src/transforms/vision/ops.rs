@@ -1,4 +1,3 @@
-use crate::sample::Sample;
 use crate::transforms::Transform;
 use anyhow::{ensure, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
@@ -234,32 +233,11 @@ impl Transform<Tensor, Tensor> for Normalize {
 }
 
 /// ===========================================================================
-/// Converts a tensor to a `Sample` with specified feature name
-#[derive(Debug)]
-pub struct ToSample {
-    feature_name: String,
-}
-
-impl ToSample {
-    pub fn new(feature_name: impl Into<String>) -> Self {
-        Self {
-            feature_name: feature_name.into(),
-        }
-    }
-}
-
-impl Transform<Tensor, Sample> for ToSample {
-    fn apply(&self, tensor: Tensor) -> Result<Sample> {
-        Ok(Sample::from_single(&self.feature_name, tensor))
-    }
-}
-
-/// ===========================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dataset::{Dataset, InMemoryDataset};
-    use crate::transforms::Transform;
+    use crate::transforms::{ToSample, Transform};
     use image::{Rgb, RgbImage};
     use tch::{Device, Kind, Tensor};
 
