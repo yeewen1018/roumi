@@ -1,4 +1,5 @@
 pub mod core;
+pub mod text;
 pub mod vision;
 
 pub use core::Transform;
