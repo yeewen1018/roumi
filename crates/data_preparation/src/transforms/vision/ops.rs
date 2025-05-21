@@ -1,3 +1,4 @@
+use crate::sample::Sample;
 use crate::transforms::Transform;
 use anyhow::{ensure, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
@@ -233,9 +234,31 @@ impl Transform<Tensor, Tensor> for Normalize {
 }
 
 /// ===========================================================================
+/// Converts a tensor to a `Sample` with specified feature name
+#[derive(Debug)]
+pub struct ToSample {
+    feature_name: String,
+}
+
+impl ToSample {
+    pub fn new(feature_name: impl Into<String>) -> Self {
+        Self {
+            feature_name: feature_name.into(),
+        }
+    }
+}
+
+impl Transform<Tensor, Sample> for ToSample {
+    fn apply(&self, tensor: Tensor) -> Result<Sample> {
+        Ok(Sample::from_single(&self.feature_name, tensor))
+    }
+}
+
+/// ===========================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset::{Dataset, InMemoryDataset};
     use crate::transforms::Transform;
     use image::{Rgb, RgbImage};
     use tch::{Device, Kind, Tensor};
@@ -317,6 +340,31 @@ mod tests {
         let tensor = pipeline.apply(img)?;
         assert_eq!(tensor.size(), vec![3, 16, 16]);
         assert_eq!(tensor.kind(), Kind::Float);
+        Ok(())
+    }
+
+    #[test]
+    fn test_vision_pipeline_with_dataset() -> Result<()> {
+        // 1. Create pipeline
+        let pipeline = Resize::new(16, 16, FilterType::Nearest)?
+            .then(RandomHorizontalFlip::new(0.5)?) // 50% flip chance
+            .then(ToTensor)
+            .then(Normalize::imagenet())
+            .then(ToSample::new("pixels"));
+
+        // 2. Create dataset with test images
+        let images = vec![test_rgb_image(), test_rgb_image(), test_rgb_image()];
+        let dataset = InMemoryDataset::new(images).with_transform(pipeline);
+
+        // 3. Verify transformed samples
+        for sample in dataset.iter() {
+            let sample = sample?;
+            let tensor = sample.get("pixels")?;
+
+            assert_eq!(tensor.size(), vec![3, 16, 16]); // CHW format
+            assert_eq!(tensor.kind(), Kind::Float);
+        }
+
         Ok(())
     }
 }
