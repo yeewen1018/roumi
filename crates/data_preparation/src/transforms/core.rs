@@ -8,6 +8,12 @@ use std::marker::PhantomData;
 /// Multiple `Transform` steps can be chained together via `.then(...)`
 /// to form a single, inlined preprocessing pipeline with zero runtime.
 ///
+/// # Example
+/// ```ignore
+/// let pipeline = TransformA.then(TransformB);
+/// let output = pipeline.apply(input)?;
+/// ```
+///
 /// Note: `then()` works only when:
 /// 1. **Types align**: `self: Transform<I, O>`, `next: Transform<O, M>`
 /// 2. **Owned**: `Self::Sized` (no trait objects, must be concrete)
@@ -33,15 +39,22 @@ pub trait Transform<I, O>: Send + Sync {
 }
 
 /// A chain of two transforms (`A` -> `B`)
-/// - `PhantomData<M>` enforces intermediate type alignment.
+///
+/// # Type Parameters
+/// - `A`: First transform (implements `Transform<I, O>`)
+/// - `B`: Second transform (implements `Transform<O, M>`)
+/// - `O`: Intermediate type (output of A, input to B)
+///
+/// Note: `PhantomData<fn()-> O>` enforces type safety without runtime
+///        overhead, ensuring that `A`'s output matches `B`'s input.
 #[derive(Debug)]
-pub struct Chain<A, B, M> {
+pub struct Chain<A, B, O> {
     first: A,
     second: B,
-    _marker: PhantomData<fn() -> M>,
+    _marker: PhantomData<fn() -> O>,
 }
 
-impl<A, B, M> Chain<A, B, M> {
+impl<A, B, O> Chain<A, B, O> {
     /// Creates a new transform chain.
     /// Use [`Transform::then`] for better ergonomics. `Chain::new` is
     /// useful when building pipelines dynamically (e.g., configurations
@@ -55,13 +68,13 @@ impl<A, B, M> Chain<A, B, M> {
     }
 }
 
-impl<I, M, O, A, B> Transform<I, O> for Chain<A, B, M>
+impl<I, O, M, A, B> Transform<I, M> for Chain<A, B, O>
 where
-    A: Transform<I, M>,
-    B: Transform<M, O>,
-    M: Send,
+    A: Transform<I, O>,
+    B: Transform<O, M>,
+    O: Send,
 {
-    fn apply(&self, input: I) -> Result<O> {
+    fn apply(&self, input: I) -> Result<M> {
         self.first
             .apply(input)
             .and_then(|mid| self.second.apply(mid))
@@ -70,7 +83,7 @@ where
                     "Transform chain failed: {} → {} → {}",
                     std::any::type_name::<A>(),
                     std::any::type_name::<B>(),
-                    std::any::type_name::<O>()
+                    std::any::type_name::<M>()
                 )
             })
     }
