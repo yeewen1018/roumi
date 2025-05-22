@@ -2,28 +2,36 @@ use crate::{sample::Sample, transforms::Transform};
 use anyhow::{Context, Result};
 use image::DynamicImage;
 
-/// Raw input container for vision + text multimodal data
+/// Container for vision + text multimodal input data
 #[derive(Clone)]
-pub struct RawMultimodalData {
+pub struct MultimodalInput {
     pub image: DynamicImage,
     pub text: String,
 }
 
-/// Multimodal pipeline
+/// Multimodal transform pipeline
 ///
-/// Runs a vision transform pipeline on `raw.image` and a text
-/// transform pipeline on `raw.text`, then merges their Samples
-/// into one.
+/// # Type Parameters
+/// - `V`: Vision transform pipeline (implements `Transform<DynamicImage, Sample>`)
+/// - `T`: Text transform pipeline (implements `Transform<String, Sample>`)
+///
+/// Processes input data by:
+/// 1. Running `vision_pipeline` on the `input.image` (DynamicImage)
+/// 2. Running `text_pipeline` on the `input.text` (String)
+/// 3. Merging the resulting Samples
 ///
 /// # Example
 /// ```ignore
 /// let multimodal = MultimodalPipeline::new(vision_pipeline, text_pipeline);
-/// let sample = multimodal.apply(RawMultimodalData { image, text })?;
+/// let sample = pipeline.apply(MultimodalInput {
+///     image: loaded_image,  // DynamicImage
+///     text: "description".into()  // String
+/// })?;
 /// ```
 #[derive(Debug, Clone)]
-pub struct MultimodalPipeline<VisionTransform, TextTransform> {
-    vision_pipeline: VisionTransform,
-    text_pipeline: TextTransform,
+pub struct MultimodalPipeline<V, T> {
+    vision_pipeline: V,
+    text_pipeline: T,
 }
 
 impl<V, T> MultimodalPipeline<V, T> {
@@ -36,21 +44,21 @@ impl<V, T> MultimodalPipeline<V, T> {
     }
 }
 
-impl<V, T> Transform<RawMultimodalData, Sample> for MultimodalPipeline<V, T>
+impl<V, T> Transform<MultimodalInput, Sample> for MultimodalPipeline<V, T>
 where
     V: Transform<DynamicImage, Sample>,
     T: Transform<String, Sample>,
 {
-    fn apply(&self, raw: RawMultimodalData) -> Result<Sample> {
-        let vision = self
+    fn apply(&self, input: MultimodalInput) -> Result<Sample> {
+        let vision_sample = self
             .vision_pipeline
-            .apply(raw.image)
+            .apply(input.image)
             .context("Vision processing failed")?;
-        let text = self
+        let text_sample = self
             .text_pipeline
-            .apply(raw.text)
+            .apply(input.text)
             .context("Text processing failed")?;
-        vision.merge(text)
+        vision_sample.merge(text_sample)
     }
 }
 
@@ -91,11 +99,11 @@ mod tests {
 
         // Create test dataset
         let dataset = InMemoryDataset::new(vec![
-            RawMultimodalData {
+            MultimodalInput {
                 image: test_image(),
                 text: "red square".into(),
             },
-            RawMultimodalData {
+            MultimodalInput {
                 image: test_image(),
                 text: "blue circle".into(),
             },
