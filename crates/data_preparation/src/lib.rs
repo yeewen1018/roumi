@@ -5,6 +5,7 @@ pub mod readers;
 pub mod sample;
 pub mod sampler;
 pub mod transforms;
+pub mod sampler; 
 
 pub use collator::StackCollator;
 pub use dataset::Dataset;
@@ -13,3 +14,4 @@ pub use minibatch::MiniBatch;
 pub use sample::Sample;
 pub use sampler::Sampler;
 pub use transforms::Transform;
+pub use sampler::Sampler; 
