@@ -124,7 +124,11 @@
 // Module declarations
 mod common;
 mod config;
+mod loader;
 mod workers;
 
 // Public re-exports
-pub use config::DataLoaderConfig;
+pub use config::{DataLoaderConfig, DataLoaderConfigBuilder};
+pub use loader::DataLoader;
+
+pub use common::thread::{worker_gen_bool, WORKER_ID, WORKER_RNG};
