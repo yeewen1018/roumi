@@ -44,8 +44,8 @@ use super::workers::WorkerControl;
 use crate::dataloader::common::thread::init_worker_rng;
 
 // Declare submodules
-//pub(crate) mod inmemory;
-//pub(crate) mod iterable;
+pub(crate) mod inmemory;
+pub(crate) mod iterable;
 
 // Constants
 const WORKER_RECV_TIMEOUT_MS: u64 = 100;
