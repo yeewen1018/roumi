@@ -41,9 +41,9 @@ where
         let current_epoch_value = self.current_epoch.fetch_add(1, Ordering::SeqCst);
 
         let sampler_epoch = if self.config.shuffle.unwrap() {
-            current_epoch_value  // Varies for different shuffle per epoch
+            current_epoch_value // Varies for different shuffle per epoch
         } else {
-            0  // Fixed for consistent order
+            0 // Fixed for consistent order
         };
 
         let worker_epoch = current_epoch_value; // Always varies for transforms
@@ -202,7 +202,7 @@ where
         batch_indices,
         config: iter_config,
         pending_tasks: 0,
-        batch_index: 0,                      
+        batch_index: 0,
         num_workers: loader_config.num_workers,
     })
 }
