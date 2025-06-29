@@ -8,7 +8,7 @@ pub mod sampler;
 pub mod transforms;
 
 pub use collator::StackCollator;
-pub use dataloader::DataLoaderConfig;
+pub use dataloader::{DataLoader, DataLoaderConfig};
 pub use dataset::Dataset;
 pub use dataset::InMemoryDataset;
 pub use minibatch::MiniBatch;

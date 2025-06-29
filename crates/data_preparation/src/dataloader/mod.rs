@@ -124,6 +124,7 @@
 // Module declarations
 mod common;
 mod config;
+mod iterator;
 mod loader;
 mod workers;
 
