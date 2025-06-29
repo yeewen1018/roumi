@@ -122,7 +122,9 @@
 //! - Reduce `batch_size`, `num_workers` or `prefetch_factor` if out-of-memory.
 
 // Module declarations
+mod common;
 mod config;
+mod workers;
 
 // Public re-exports
 pub use config::DataLoaderConfig;
