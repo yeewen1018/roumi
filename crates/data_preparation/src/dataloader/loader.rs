@@ -98,7 +98,6 @@ pub(crate) enum LoaderType {
     InMemory {
         batch_sampler: Box<dyn Sampler<Item = Vec<usize>> + Send + Sync>,
         worker_manager: Option<Arc<InMemoryWorkerManager>>,
-        uses_internal_shuffle: bool,
     },
     Iterable {
         worker_manager: Option<Arc<IterableWorkerManager>>,
@@ -220,7 +219,6 @@ where
             loader_type: LoaderType::InMemory {
                 batch_sampler: Box::new(batch_sampler),
                 worker_manager,
-                uses_internal_shuffle: true,
             },
         })
     }
@@ -348,7 +346,6 @@ where
             loader_type: LoaderType::InMemory {
                 batch_sampler: Box::new(batch_sampler),
                 worker_manager,
-                uses_internal_shuffle: false,
             },
         })
     }
@@ -479,7 +476,6 @@ where
             loader_type: LoaderType::InMemory {
                 batch_sampler: Box::new(batch_sampler),
                 worker_manager,
-                uses_internal_shuffle: false,
             },
         })
     }

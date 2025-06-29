@@ -62,7 +62,6 @@ where
             LoaderType::InMemory {
                 batch_sampler,
                 worker_manager,
-                uses_internal_shuffle: _,
             } => {
                 let batch_indices = batch_sampler.iter(sampler_epoch);
 
