@@ -232,9 +232,11 @@ where
                             // Deterministic round-robin assignment
                             let assigned_worker = *batch_index % *num_workers;
 
-                            if let Err(e) =
-                                worker_manager.send_task_to_worker(assigned_worker, indices)
-                            {
+                            if let Err(e) = worker_manager.send_task_to_worker(
+                                assigned_worker,
+                                indices,
+                                config.epoch,
+                            ) {
                                 return Some(Err(e.context(format!(
                                     "Failed to send batch {} to worker {}",
                                     *batch_index, assigned_worker
@@ -262,6 +264,10 @@ where
                         )))),
                     }
                 } else {
+                    // No more pending tasks - ensure workers have finished
+                    if let Err(e) = worker_manager.wait_for_completion() {
+                        eprintln!("Warning: Failed to wait for worker completion: {}", e);
+                    }
                     None // All batches consumed
                 }
             }
@@ -287,7 +293,9 @@ where
                             let worker_id = *batch_index % *num_workers;
                             *batch_index += 1;
 
-                            if let Err(e) = worker_manager.send_task_to_worker(worker_id, indices) {
+                            if let Err(e) =
+                                worker_manager.send_task_to_worker(worker_id, indices, config.epoch)
+                            {
                                 return Some(Err(e));
                             }
                             *pending_tasks += 1;
@@ -325,7 +333,8 @@ where
                 // Send end-of-epoch signals to all workers
                 else if !*sentinels_sent && *batches_exhausted {
                     for i in 0..*num_workers {
-                        if let Err(e) = worker_manager.send_task_to_worker(i, vec![]) {
+                        if let Err(e) = worker_manager.send_task_to_worker(i, vec![], config.epoch)
+                        {
                             return Some(Err(e));
                         }
                     }

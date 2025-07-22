@@ -7,32 +7,39 @@
 //!
 //! # Architecture:
 //! - Workers share the dataset via `Arc` for zero-copy access.
-//! - Tasks are distributed through a shared channel (load balancing)
+//! - Tasks are distributed via per-worker channels with work stealing
 //! - Supports both fresh workers per epoch and persistent workers
 //!
-//! # Task Types
-//! - `Batch(Vec<usize>)`: Process samples at the given indices
-//! - `EndEpoch`: Signal to persistent workers that epoch is complete
+//! # Work stealing:
+//! - Each worker has a dedicated primary queue for deterministic assignment
+//! - Overflow tasks go to a shared steal queue when primary queues are full
+//! - Workers check steal queue when their primary queue is empty
+//! - RNG seedling uses original intended worker for determinism
 
 use crate::collator::Collator;
 use crate::dataset::InMemoryDataset;
 use crate::minibatch::MiniBatch;
 use crate::sample::Sample;
 use anyhow::{anyhow, Context, Result};
-use crossbeam_channel::RecvTimeoutError;
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::pool::WorkerPool;
+use super::STEAL_THRESHOLD_MS;
 use crate::dataloader::common::thread::{init_worker_rng, WORKER_ID};
 use crate::dataloader::config::DataLoaderConfig;
 
 // Task types for in-memory worker communication.
 #[derive(Debug)]
 pub enum InMemoryWorkerTask {
-    /// Process a batch of indices
-    Batch(Vec<usize>),
+    /// Process a batch of indices with deterministic assignment info
+    Batch {
+        indices: Vec<usize>,
+        intended_worker: usize, // Original worker assignment for RNG determinism
+        epoch: usize,           // For RNG seeding
+    },
     /// Signal end of epoch
     EndEpoch,
     /// Set epoch for RNG initialization
@@ -42,6 +49,7 @@ pub enum InMemoryWorkerTask {
 /// Manages workers for in-memory datasets.
 pub(crate) struct InMemoryWorkerManager {
     pub(crate) worker_pool: WorkerPool<InMemoryWorkerTask, Result<MiniBatch>>,
+    pub(crate) steal_queue: Option<(Sender<InMemoryWorkerTask>, Receiver<InMemoryWorkerTask>)>,
 }
 
 impl InMemoryWorkerManager {
@@ -59,37 +67,53 @@ impl InMemoryWorkerManager {
         Raw: Clone + Send + Sync + 'static,
         C: Collator + Clone + Send + Sync + 'static,
     {
-        if config.persistent_workers && num_workers > 0 {
-            let pool = Self::create_persistent_pool(dataset, collator, num_workers, config)?;
-            Ok(Self { worker_pool: pool })
+        // Create steal queue if using workers
+        let steal_queue = if num_workers > 0 {
+            let capacity = num_workers * config.prefetch_factor;
+            let (tx, rx) = bounded(capacity);
+            Some((tx, rx))
         } else {
-            // Fresh worker
+            None
+        };
+
+        if config.persistent_workers && num_workers > 0 {
+            let pool = Self::create_persistent_pool(
+                dataset,
+                collator,
+                num_workers,
+                config,
+                steal_queue
+                    .as_ref()
+                    .map(|(tx, rx)| (tx.clone(), rx.clone())),
+            )?;
+            Ok(Self {
+                worker_pool: pool,
+                steal_queue,
+            })
+        } else {
+            // For fresh workers, create a minimal pool structure
+            // The actual pool will be created in the iterator
             let dummy_pool = WorkerPool {
                 workers: vec![],
-                task_tx: None,
-                worker_task_txs: None,
+                worker_task_txs: vec![],
                 output_rx: crossbeam_channel::never(),
                 shutdown: Arc::new(AtomicBool::new(false)),
             };
 
             Ok(Self {
                 worker_pool: dummy_pool,
+                steal_queue,
             })
         }
     }
 
     /// Creates a pool of persistent workers that survive across epochs.
-    ///
-    /// # Worker Design
-    /// Each worker runs a simple event loop:
-    /// 1. Receive InMemoryWorkerTask from shared channel
-    /// 2. Process Batch tasks or handle EndEpoch signals
-    /// 3. Send results back via output channel.
     pub(crate) fn create_persistent_pool<Raw, C>(
         dataset: Arc<InMemoryDataset<Raw>>,
         collator: C,
         num_workers: usize,
         config: &DataLoaderConfig,
+        steal_queue: Option<(Sender<InMemoryWorkerTask>, Receiver<InMemoryWorkerTask>)>,
     ) -> Result<WorkerPool<InMemoryWorkerTask, Result<MiniBatch>>>
     where
         Raw: Clone + Send + Sync + 'static,
@@ -97,23 +121,54 @@ impl InMemoryWorkerManager {
     {
         let buffer_size = config.prefetch_factor;
 
-        WorkerPool::new_deterministic(
+        WorkerPool::new(
             num_workers,
             buffer_size,
             move |task_rx, output_tx, shutdown| {
                 let worker_id = WORKER_ID.with(|id| *id.borrow());
                 WORKER_ID.with(|id| *id.borrow_mut() = worker_id);
 
+                let steal_rx = steal_queue.as_ref().map(|(_, rx)| rx.clone());
+                let mut current_base_seed: Option<u64> = None;
+
                 loop {
                     if shutdown.load(Ordering::Relaxed) {
                         break;
                     }
 
-                    match task_rx.recv() {
-                        Ok(InMemoryWorkerTask::SetEpoch { epoch, base_seed }) => {
+                    // Try primary queue with timeout, then try steal queue
+                    let task = match task_rx.recv_timeout(Duration::from_millis(STEAL_THRESHOLD_MS))
+                    {
+                        Ok(task) => task,
+                        Err(RecvTimeoutError::Timeout) => {
+                            // Primary empty, try steal queue
+                            if let Some(ref steal_rx) = steal_rx {
+                                match steal_rx.try_recv() {
+                                    Ok(task) => task,
+                                    Err(_) => continue, // No work, loop back
+                                }
+                            } else {
+                                continue; // No steal queue, loop back
+                            }
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+
+                    match task {
+                        InMemoryWorkerTask::SetEpoch { epoch, base_seed } => {
+                            current_base_seed = Some(base_seed);
                             init_worker_rng(worker_id, epoch, base_seed);
                         }
-                        Ok(InMemoryWorkerTask::Batch(indices)) => {
+                        InMemoryWorkerTask::Batch {
+                            indices,
+                            intended_worker,
+                            epoch,
+                        } => {
+                            // Use intended worker for RNG seeding
+                            if let Some(seed) = current_base_seed {
+                                init_worker_rng(intended_worker, epoch, seed);
+                            }
+
                             let result = Self::process_batch_lazy(&dataset, &indices, &collator)
                                 .with_context(|| format!("Persistent worker {} failed", worker_id));
 
@@ -121,11 +176,8 @@ impl InMemoryWorkerManager {
                                 break;
                             }
                         }
-                        Ok(InMemoryWorkerTask::EndEpoch) => {
+                        InMemoryWorkerTask::EndEpoch => {
                             let _ = output_tx.send(Err(anyhow!("WORKER_EPOCH_DONE")));
-                        }
-                        Err(_) => {
-                            break;
                         }
                     }
                 }
@@ -165,42 +217,59 @@ impl InMemoryWorkerManager {
             .with_context(|| format!("Failed to collate batch of {} samples", samples.len()))
     }
 
-    /// Sends a batch of indices to the worker pool for processing.
-    ///
-    /// Workers will fetch samples at these indices and create a MiniBatch.
-    /// An empty vec! signals EndEpoch for persistent workers
-    pub(crate) fn send_task(&self, indices: Vec<usize>) -> Result<()> {
+    /// Sends a batch to specific worker with work stealing fallback
+    pub(crate) fn send_task_to_worker(
+        &self,
+        worker_id: usize,
+        indices: Vec<usize>,
+        epoch: usize,
+    ) -> Result<()> {
         let task = if indices.is_empty() {
             InMemoryWorkerTask::EndEpoch
         } else {
-            InMemoryWorkerTask::Batch(indices)
+            InMemoryWorkerTask::Batch {
+                indices,
+                intended_worker: worker_id,
+                epoch,
+            }
         };
 
-        self.worker_pool
-            .task_tx
-            .as_ref()
-            .ok_or_else(|| anyhow!("Worker pool task channel is closed"))?
-            .send(task)
-            .map_err(|_| anyhow!("Failed to send task to workers"))
-    }
+        let worker_tx = &self.worker_pool.worker_task_txs[worker_id];
 
-    /// Sends a batch to specific worker (deterministic mode)
-    pub(crate) fn send_task_to_worker(&self, worker_id: usize, indices: Vec<usize>) -> Result<()> {
-        if let Some(ref worker_txs) = self.worker_pool.worker_task_txs {
-            // Create task directly here
-            let task = if indices.is_empty() {
-                InMemoryWorkerTask::EndEpoch
-            } else {
-                InMemoryWorkerTask::Batch(indices)
-            };
-
-            // Deterministic mode - send to specific worker
-            worker_txs[worker_id]
-                .send(task)
-                .map_err(|_| anyhow!("Failed to send task to worker {}", worker_id))
-        } else {
-            // Fallback to shared channel
-            self.send_task(indices)
+        // Try primary queue first (non-blocking)
+        match worker_tx.try_send(task) {
+            Ok(_) => {
+                // Success - sent to intended worker
+                Ok(())
+            }
+            Err(TrySendError::Full(task)) => {
+                // Primary queue full, try steal queue if available
+                if let Some((ref steal_tx, _)) = self.steal_queue {
+                    match steal_tx.try_send(task) {
+                        Ok(_) => {
+                            // Successfully send task to intended worker
+                            Ok(())
+                        }
+                        Err(TrySendError::Full(task)) => {
+                            // Both queues full, fall back to blocking send
+                            worker_tx
+                                .send(task)
+                                .map_err(|_| anyhow!("Worker {} channel closed", worker_id))
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            Err(anyhow!("Steal queue disconnected"))
+                        }
+                    }
+                } else {
+                    // No steal queue, fall back to blocking send
+                    worker_tx
+                        .send(task)
+                        .map_err(|_| anyhow!("Worker {} channel closed", worker_id))
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Err(anyhow!("Worker {} has disconnected", worker_id))
+            }
         }
     }
 
@@ -222,23 +291,15 @@ impl InMemoryWorkerManager {
     }
 
     /// Send epoch information to all workers
-    pub(crate) fn set_epoch(&self, epoch: usize, base_seed: u64, num_workers: usize) -> Result<()> {
-        if let Some(ref worker_txs) = self.worker_pool.worker_task_txs {
-            // Deterministic mode - send to each worker directly
-            for tx in worker_txs.iter() {
-                tx.send(InMemoryWorkerTask::SetEpoch { epoch, base_seed })
-                    .map_err(|_| anyhow!("Failed to send epoch info to workers"))?;
-            }
-        } else if let Some(ref task_tx) = self.worker_pool.task_tx {
-            // Shared channel mode - broadcast to all
-            for _ in 0..num_workers {
-                task_tx
-                    .send(InMemoryWorkerTask::SetEpoch { epoch, base_seed })
-                    .map_err(|_| anyhow!("Failed to send epoch info to workers"))?;
-            }
-        } else {
-            return Err(anyhow!("Worker pool has no task channels"));
+    pub(crate) fn set_epoch(&self, epoch: usize, base_seed: u64) -> Result<()> {
+        for tx in &self.worker_pool.worker_task_txs {
+            tx.send(InMemoryWorkerTask::SetEpoch { epoch, base_seed })
+                .map_err(|_| anyhow!("Failed to send epoch info to workers"))?;
         }
         Ok(())
+    }
+
+    pub(crate) fn wait_for_completion(&self) -> Result<()> {
+        self.worker_pool.wait_for_completion()
     }
 }

@@ -69,7 +69,7 @@ where
                     if self.config.persistent_workers {
                         if let Some(base_seed) = self.runtime_seed {
                             manager
-                                .set_epoch(worker_epoch, base_seed, self.config.num_workers)
+                                .set_epoch(worker_epoch, base_seed)
                                 .context("Failed to send epoch info to persistent workers")?;
                         }
                         // Persistent workers
@@ -148,13 +148,12 @@ where
     let buffer_size = loader_config.num_workers * loader_config.prefetch_factor;
     let worker_timeout = loader_config.worker_timeout;
 
-    let worker_pool = WorkerPool::new_deterministic(
+    let worker_pool = WorkerPool::new(
         loader_config.num_workers,
         buffer_size,
         move |task_rx: Receiver<InMemoryWorkerTask>,
               output_tx: Sender<Result<MiniBatch>>,
               shutdown| {
-            // Changed to InMemoryWorkerTask
             let worker_id = WORKER_ID.with(|id| *id.borrow());
 
             if let Some(base_seed) = runtime_seed {
@@ -165,11 +164,16 @@ where
                 match task_rx.recv_timeout(worker_timeout) {
                     Ok(InMemoryWorkerTask::SetEpoch { epoch, base_seed }) => {
                         // Fresh workers are created per epoch, so this message is unexpected.
-                        // However, we handle it for completeness and reinitialize RNG if received.
+                        // However, we handle it for completeness
                         init_worker_rng(worker_id, epoch, base_seed);
                     }
-                    Ok(InMemoryWorkerTask::Batch(indices)) => {
-                        // Handle InMemoryWorkerTask::Batch
+                    Ok(InMemoryWorkerTask::Batch {
+                        indices,
+                        intended_worker: _,
+                        epoch: _,
+                    }) => {
+                        // For fresh workers, we can use intended_worker for consistency
+                        // but it is less critical since there is no cross-epoch stealing
                         let batch_size = indices.len();
                         let result = InMemoryWorkerManager::process_batch_lazy(
                             &dataset, &indices, &collator,
@@ -180,6 +184,7 @@ where
                                 worker_id, batch_size
                             )
                         });
+
                         if output_tx.send(result).is_err() {
                             break;
                         }
@@ -197,7 +202,10 @@ where
     .context("Failed to create fresh worker pool for in-memory dataset")?;
 
     Ok(IteratorImpl::InMemoryMulti {
-        worker_manager: Arc::new(InMemoryWorkerManager { worker_pool }),
+        worker_manager: Arc::new(InMemoryWorkerManager {
+            worker_pool,
+            steal_queue: None,
+        }),
         batch_indices,
         config: iter_config,
         pending_tasks: 0,

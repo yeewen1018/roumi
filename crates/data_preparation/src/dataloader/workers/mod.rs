@@ -20,3 +20,9 @@ pub enum WorkerControl {
     /// Signal workers to begin processing a new epoch
     StartEpoch { epoch: usize, base_seed: u64 },
 }
+
+// Work stealing threshold - how long workers wait before checking steal queue
+pub(crate) const STEAL_THRESHOLD_MS: u64 = 10;
+
+/// Timeout for draining remaining outputs during worker pool shutdown (milliseconds)
+pub(crate) const COMPLETION_TIMEOUT_MS: u64 = 100;
