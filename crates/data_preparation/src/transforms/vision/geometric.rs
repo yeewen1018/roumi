@@ -270,6 +270,119 @@ impl Transform<DynamicImage, DynamicImage> for RandomCrop {
     }
 }
 
+// ============================================================================
+// CenterCrop
+// ============================================================================
+
+/// Crops the center of an image to the specified dimensions.
+///
+/// If the input image is smaller than the crop size in any dimension,
+/// it will be padded with the specified fill value before cropping.
+///
+/// # Arguments
+/// - `width`: Target width in pixels
+/// - `height`: Target height in pixels
+/// - `pad_value`: RGB fill colour for padding (default: [0, 0, 0] black)
+///
+/// # Example
+/// ```ignore
+/// // Basic center crop
+/// let crop = CenterCrop::new(224, 224, None)?;
+///
+/// // With white padding for small images
+/// let crop = CenterCrop::new(512, 512, Some([225, 255, 255]))?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct CenterCrop {
+    width: u32,
+    height: u32,
+    pad_value: [u8; 3],
+}
+
+impl CenterCrop {
+    pub fn new(width: u32, height: u32, pad_value: Option<[u8; 3]>) -> Result<Self> {
+        ensure!(
+            width > 0 && height > 0,
+            "Crop dimensions must be positive (got {}x{})",
+            width,
+            height
+        );
+        Ok(Self {
+            width,
+            height,
+            pad_value: pad_value.unwrap_or([0, 0, 0]),
+        })
+    }
+}
+
+impl Transform<DynamicImage, DynamicImage> for CenterCrop {
+    fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
+        let (img_width, img_height) = img.dimensions();
+
+        // Direct crop if image is large enough
+        if img_width >= self.width && img_height >= self.height {
+            let left = (img_width - self.width) / 2;
+            let top = (img_height - self.height) / 2;
+            return Ok(img.crop_imm(left, top, self.width, self.height));
+        }
+
+        // Create padded result buffer
+        let mut result = ImageBuffer::from_pixel(self.width, self.height, Rgb(self.pad_value));
+
+        // Calculate positioning
+        let paste_x = if img_width < self.width {
+            (self.width - img_width) / 2
+        } else {
+            0
+        };
+
+        let paste_y = if img_height < self.height {
+            (self.height - img_height) / 2
+        } else {
+            0
+        };
+
+        // Calculate the region to copy from the source image
+        let copy_width = img_width.min(self.width);
+        let copy_height = img_height.min(self.height);
+
+        let src_x = if img_width > self.width {
+            (img_width - self.width) / 2
+        } else {
+            0
+        };
+
+        let src_y = if img_height > self.height {
+            (img_height - self.height) / 2
+        } else {
+            0
+        };
+
+        // Copy pixels efficiently
+        match img {
+            DynamicImage::ImageRgb8(ref rgb_img) => {
+                for y in 0..copy_height {
+                    for x in 0..copy_width {
+                        let pixel = rgb_img.get_pixel(src_x + x, src_y + y);
+                        result.put_pixel(paste_x + x, paste_y + y, *pixel);
+                    }
+                }
+            }
+            _ => {
+                let rgb_img = img.to_rgb8();
+                for y in 0..copy_height {
+                    for x in 0..copy_width {
+                        let pixel = rgb_img.get_pixel(src_x + x, src_y + y);
+                        result.put_pixel(paste_x + x, paste_y + y, *pixel);
+                    }
+                }
+            }
+        }
+
+        Ok(DynamicImage::ImageRgb8(result))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +421,22 @@ mod tests {
         let resize = Resize::new(50, 50, FilterType::Nearest)?;
         let resized = resize.apply(img)?;
         assert_eq!(resized.dimensions(), (50, 50));
+        Ok(())
+    }
+
+    #[test]
+    fn test_center_crop() -> Result<()> {
+        let img = test_gradient_image(100, 100);
+
+        // Test basic crop
+        let crop = CenterCrop::new(50, 50, None)?;
+        let cropped = crop.apply(img.clone())?;
+        assert_eq!(cropped.dimensions(), (50, 50));
+
+        // Test crop larger than image (should pad)
+        let large_crop = CenterCrop::new(150, 150, Some([255, 0, 0]))?;
+        let padded = large_crop.apply(img)?;
+        assert_eq!(padded.dimensions(), (150, 150));
         Ok(())
     }
 
