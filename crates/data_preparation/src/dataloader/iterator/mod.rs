@@ -208,9 +208,10 @@ where
                                 indices.len()
                             )))
                         } else {
-                            let batch_result = config.collator.collate(&samples).with_context(||{
-                                format!("Collation failed for {} samples", samples.len())
-                            });
+                            let batch_result =
+                                config.collator.collate(&samples).with_context(|| {
+                                    format!("Collation failed for {} samples", samples.len())
+                                });
 
                             let final_batch = if config.pin_memory {
                                 batch_result.map(|batch| batch.pin_memory())
@@ -406,8 +407,11 @@ where
                 if samples.is_empty() || (config.drop_last && samples.len() < config.batch_size) {
                     None
                 } else {
-                    let batch_result = config.collator.collate(&samples).with_context(||{
-                        format!("Failed to collate streaming batch of {} samples", samples.len())
+                    let batch_result = config.collator.collate(&samples).with_context(|| {
+                        format!(
+                            "Failed to collate streaming batch of {} samples",
+                            samples.len()
+                        )
                     });
 
                     let final_batch = if config.pin_memory {
@@ -461,8 +465,11 @@ where
                     let batch_end = sample_buffer.len().min(config.batch_size);
                     let samples: Vec<_> = sample_buffer.drain(0..batch_end).collect();
 
-                    let batch_result = config.collator.collate(&samples).with_context(||{
-                        format!("Failed to collate streaming batch of {} samples", samples.len())
+                    let batch_result = config.collator.collate(&samples).with_context(|| {
+                        format!(
+                            "Failed to collate streaming batch of {} samples",
+                            samples.len()
+                        )
                     });
 
                     let final_batch = if config.pin_memory {
@@ -562,7 +569,7 @@ where
                     let batch_end = sample_buffer.len().min(config.batch_size);
                     let samples: Vec<_> = sample_buffer.drain(0..batch_end).collect();
 
-                    let batch_result = config.collator.collate(&samples).with_context(||{
+                    let batch_result = config.collator.collate(&samples).with_context(|| {
                         format!("Failed to collate batch of {} samples", samples.len())
                     });
 

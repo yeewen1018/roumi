@@ -170,8 +170,11 @@ impl InMemoryWorkerManager {
                                 init_worker_rng(intended_worker, epoch, seed);
                             }
 
-                            let result = Self::process_batch_lazy(&dataset, &indices, &collator, pin_memory)
-                                .with_context(|| format!("Persistent worker {} failed", worker_id));
+                            let result =
+                                Self::process_batch_lazy(&dataset, &indices, &collator, pin_memory)
+                                    .with_context(|| {
+                                        format!("Persistent worker {} failed", worker_id)
+                                    });
 
                             if output_tx.send(result).is_err() {
                                 break;
@@ -214,7 +217,8 @@ impl InMemoryWorkerManager {
             .collect();
 
         let samples = samples_result?;
-        let batch = collator.collate(&samples)
+        let batch = collator
+            .collate(&samples)
             .with_context(|| format!("Failed to collate batch of {} samples", samples.len()))?;
 
         Ok(if pin_memory {
