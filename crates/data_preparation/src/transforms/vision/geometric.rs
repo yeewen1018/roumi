@@ -3,6 +3,22 @@ use anyhow::{ensure, Result};
 use image::{imageops::FilterType, DynamicImage};
 
 // ============================================================================
+// EnsureRGB
+// ============================================================================
+/// Ensures that the image is indeed 3-channel RGB
+#[derive(Debug, Clone)]
+pub struct EnsureRGB;
+
+impl Transform<DynamicImage, DynamicImage> for EnsureRGB {
+    fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
+        Ok(match img {
+            DynamicImage::ImageRgb8(_) => img,
+            _ => DynamicImage::ImageRgb8(img.to_rgb8()),
+        })
+    }
+}
+
+// ============================================================================
 // Resize
 // ============================================================================
 
