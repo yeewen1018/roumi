@@ -120,6 +120,7 @@ impl InMemoryWorkerManager {
         C: Collator + Clone + Send + Sync + 'static,
     {
         let buffer_size = config.prefetch_factor;
+        let pin_memory = config.pin_memory;
 
         WorkerPool::new(
             num_workers,
@@ -169,7 +170,7 @@ impl InMemoryWorkerManager {
                                 init_worker_rng(intended_worker, epoch, seed);
                             }
 
-                            let result = Self::process_batch_lazy(&dataset, &indices, &collator)
+                            let result = Self::process_batch_lazy(&dataset, &indices, &collator, pin_memory)
                                 .with_context(|| format!("Persistent worker {} failed", worker_id));
 
                             if output_tx.send(result).is_err() {
@@ -193,12 +194,13 @@ impl InMemoryWorkerManager {
         dataset: &InMemoryDataset<Raw>,
         indices: &[usize],
         collator: &C,
+        pin_memory: bool,
     ) -> Result<MiniBatch>
     where
         Raw: Clone + Send + Sync + 'static,
         C: Collator,
     {
-        let samples: Result<Vec<Sample>> = indices
+        let samples_result: Result<Vec<Sample>> = indices
             .iter()
             .map(|&index| {
                 dataset.get_sample(index).with_context(|| {
@@ -211,10 +213,15 @@ impl InMemoryWorkerManager {
             })
             .collect();
 
-        let samples = samples?;
-        collator
-            .collate(&samples)
-            .with_context(|| format!("Failed to collate batch of {} samples", samples.len()))
+        let samples = samples_result?;
+        let batch = collator.collate(&samples)
+            .with_context(|| format!("Failed to collate batch of {} samples", samples.len()))?;
+
+        Ok(if pin_memory {
+            batch.pin_memory()
+        } else {
+            batch
+        })
     }
 
     /// Sends a batch to specific worker with work stealing fallback

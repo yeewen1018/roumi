@@ -78,6 +78,7 @@ where
             prefetch_factor: self.config.prefetch_factor,
             runtime_seed,
             epoch,
+            pin_memory: self.config.pin_memory,
         };
 
         match &self.loader_type {

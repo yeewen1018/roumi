@@ -70,6 +70,36 @@ impl MiniBatch {
                 .collect(),
         }
     }
+
+    /// Pins all tensors in this batch to page-locked memory for faster GPU transfer. 
+    /// If CUDA is not available, returns self unchanged.
+    pub fn pin_memory(self) -> Self {
+        if tch::Cuda::is_available() {
+            let device = Device::Cuda(0);
+            let pinned_tensors = self.tensors
+                .into_iter()
+                .map(|(key, tensor)| (key, tensor.pin_memory(device)))
+                .collect();
+   
+            Self{
+                tensors: pinned_tensors
+            }
+        } else {
+            self
+        }
+    }
+
+    /// Returns true if the tensors in this batch are using pinned memory
+    pub fn is_pinned(&self) -> bool {
+        if !tch::Cuda::is_available() {
+            return false;
+        }
+        self.tensors
+            .values()
+            .next()
+            .map(|t| t.is_pinned(Device::Cuda(0)))
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

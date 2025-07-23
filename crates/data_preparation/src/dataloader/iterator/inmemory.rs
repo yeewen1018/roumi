@@ -56,6 +56,7 @@ where
             prefetch_factor: self.config.prefetch_factor,
             runtime_seed,
             epoch: worker_epoch,
+            pin_memory: self.config.pin_memory,
         };
 
         match &self.loader_type {
@@ -147,6 +148,7 @@ where
 {
     let buffer_size = loader_config.num_workers * loader_config.prefetch_factor;
     let worker_timeout = loader_config.worker_timeout;
+    let pin_memory = loader_config.pin_memory;
 
     let worker_pool = WorkerPool::new(
         loader_config.num_workers,
@@ -176,7 +178,7 @@ where
                         // but it is less critical since there is no cross-epoch stealing
                         let batch_size = indices.len();
                         let result = InMemoryWorkerManager::process_batch_lazy(
-                            &dataset, &indices, &collator,
+                            &dataset, &indices, &collator, pin_memory,
                         )
                         .with_context(|| {
                             format!(

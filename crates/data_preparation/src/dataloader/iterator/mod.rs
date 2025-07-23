@@ -60,6 +60,7 @@ struct IteratorConfig<'a, C> {
     prefetch_factor: usize,
     runtime_seed: Option<u64>,
     epoch: usize,
+    pin_memory: bool,
 }
 
 /// Iterator over batches of data.
@@ -207,9 +208,16 @@ where
                                 indices.len()
                             )))
                         } else {
-                            Some(config.collator.collate(&samples).with_context(|| {
+                            let batch_result = config.collator.collate(&samples).with_context(||{
                                 format!("Collation failed for {} samples", samples.len())
-                            }))
+                            });
+
+                            let final_batch = if config.pin_memory {
+                                batch_result.map(|batch| batch.pin_memory())
+                            } else {
+                                batch_result
+                            };
+                            Some(final_batch)
                         }
                     }
                     Err(e) => Some(Err(e)),
@@ -398,12 +406,17 @@ where
                 if samples.is_empty() || (config.drop_last && samples.len() < config.batch_size) {
                     None
                 } else {
-                    Some(config.collator.collate(&samples).with_context(|| {
-                        format!(
-                            "Failed to collate streaming batch of {} samples",
-                            samples.len()
-                        )
-                    }))
+                    let batch_result = config.collator.collate(&samples).with_context(||{
+                        format!("Failed to collate streaming batch of {} samples", samples.len())
+                    });
+
+                    let final_batch = if config.pin_memory {
+                        batch_result.map(|batch| batch.pin_memory())
+                    } else {
+                        batch_result
+                    };
+
+                    Some(final_batch)
                 }
             }
 
@@ -446,15 +459,19 @@ where
                     None
                 } else {
                     let batch_end = sample_buffer.len().min(config.batch_size);
-                    let batch: Vec<_> = sample_buffer.drain(0..batch_end).collect();
+                    let samples: Vec<_> = sample_buffer.drain(0..batch_end).collect();
 
-                    Some(config.collator.collate(&batch)
-                        .with_context(|| format!(
-                            "Failed to collate streaming batch of {} samples (expected batch_size: {})",
-                            batch.len(),
-                            config.batch_size
-                        ))
-                    )
+                    let batch_result = config.collator.collate(&samples).with_context(||{
+                        format!("Failed to collate streaming batch of {} samples", samples.len())
+                    });
+
+                    let final_batch = if config.pin_memory {
+                        batch_result.map(|batch| batch.pin_memory())
+                    } else {
+                        batch_result
+                    };
+
+                    Some(final_batch)
                 }
             }
 
@@ -543,11 +560,19 @@ where
                 } else {
                     // Create and return batch
                     let batch_end = sample_buffer.len().min(config.batch_size);
-                    let batch: Vec<_> = sample_buffer.drain(0..batch_end).collect();
+                    let samples: Vec<_> = sample_buffer.drain(0..batch_end).collect();
 
-                    Some(config.collator.collate(&batch).with_context(|| {
-                        format!("Failed to collate batch of {} samples", batch.len())
-                    }))
+                    let batch_result = config.collator.collate(&samples).with_context(||{
+                        format!("Failed to collate batch of {} samples", samples.len())
+                    });
+
+                    let final_batch = if config.pin_memory {
+                        batch_result.map(|batch| batch.pin_memory())
+                    } else {
+                        batch_result
+                    };
+
+                    Some(final_batch)
                 }
             }
         }
