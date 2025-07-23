@@ -132,4 +132,4 @@ mod workers;
 pub use config::{DataLoaderConfig, DataLoaderConfigBuilder};
 pub use loader::DataLoader;
 
-pub use common::thread::{worker_gen_bool, WORKER_ID, WORKER_RNG};
+pub use common::thread::{init_worker_rng, worker_gen_bool, WORKER_ID, WORKER_RNG};
