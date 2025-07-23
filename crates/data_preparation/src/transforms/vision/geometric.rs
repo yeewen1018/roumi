@@ -1,6 +1,7 @@
 use crate::dataloader::worker_gen_range;
 use crate::transforms::Transform;
 use anyhow::{anyhow, ensure, Result};
+use fast_image_resize as fir;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, Rgb};
 
 // ============================================================================
@@ -383,6 +384,180 @@ impl Transform<DynamicImage, DynamicImage> for CenterCrop {
     }
 }
 
+/// ===========================================================================
+/// RandomResizedCrop
+/// ===========================================================================
+/// Randomly crops a region from the image and resizes it to the target size.
+///
+/// # Parameters
+/// - `width`: Target width after resizing
+/// - `height`: Target height after resizing
+/// - `scale`: Range of the cropped area relative to the original image area (e.g., (0.08, 1.0) means 8% to 100%)
+/// - `ratio`: Range of aspect ratios for the crop (e.g., (0.75, 1.333) means 3:4 to 4:3)
+/// - `filter`: Interpolation method for resizing (default: Triangle/Bilinear)
+///
+/// # Example
+/// ```ignore
+/// // Basic usage with defaults
+/// let crop = RandomResizedCrop::new(224, 224)?;
+///
+/// // Custom scale and ratio ranges
+/// let crop = RandomResizedCrop::new(224, 224)?
+///     .with_scale((0.08, 1.0))?
+///     .with_ratio((0.75, 1.333))?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct RandomResizedCrop {
+    width: u32,
+    height: u32,
+    scale_min: f64,
+    scale_max: f64,
+    ratio_min: f64,
+    ratio_max: f64,
+    max_attempts: u32,
+    filter: FilterType,
+}
+
+impl RandomResizedCrop {
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        ensure!(
+            width > 0 && height > 0,
+            "Target dimensions must be positive (got {}x{})",
+            width,
+            height
+        );
+        Ok(Self {
+            width,
+            height,
+            scale_min: 0.08,
+            scale_max: 1.0,
+            ratio_min: 3.0 / 4.0,
+            ratio_max: 4.0 / 3.0,
+            max_attempts: 10,
+            filter: FilterType::Triangle,
+        })
+    }
+
+    /// Set the scale range for random cropping.
+    ///
+    /// Scale represents the fraction of the original image area to crop.
+    pub fn with_scale(mut self, scale: (f64, f64)) -> Result<Self> {
+        let (min, max) = scale;
+        ensure!(
+            0.0 < min && min <= max && max <= 1.0,
+            "Scale range must satisfy 0 < min <= max <= 1 (got [{}, {}])",
+            min,
+            max
+        );
+        self.scale_min = min;
+        self.scale_max = max;
+        Ok(self)
+    }
+
+    /// Set the aspect ratio range for random cropping.
+    ///
+    /// Ratio is width/height of the crop region.
+    pub fn with_ratio(mut self, ratio: (f64, f64)) -> Result<Self> {
+        let (min, max) = ratio;
+        ensure!(
+            0.0 < min && min <= max,
+            "Ratio range must satisfy 0 < min <= max (got [{}, {}])",
+            min,
+            max
+        );
+        self.ratio_min = min;
+        self.ratio_max = max;
+        Ok(self)
+    }
+
+    /// Set the interpolation filter for resizing.
+    pub fn with_filter(mut self, filter: FilterType) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    fn get_params(&self, img_width: u32, img_height: u32) -> Result<(u32, u32, u32, u32)> {
+        let area = (img_width * img_height) as f64;
+
+        // Try to find a valid random crop
+        for _ in 0..self.max_attempts {
+            let target_area = area * worker_gen_range(self.scale_min..=self.scale_max)?;
+            let aspect_ratio = worker_gen_range(self.ratio_min..=self.ratio_max)?;
+
+            let w = (target_area * aspect_ratio).sqrt().round() as u32;
+            let h = (target_area / aspect_ratio).sqrt().round() as u32;
+
+            if w <= img_width && h <= img_height {
+                let left = worker_gen_range(0..=(img_width - w))?;
+                let top = worker_gen_range(0..=(img_height - h))?;
+                return Ok((left, top, w, h));
+            }
+        }
+
+        // Fallback: center crop with constrained aspect ratio
+        let in_ratio = img_width as f64 / img_height as f64;
+        let (w, h) = if in_ratio < self.ratio_min {
+            (
+                img_width,
+                (img_width as f64 / self.ratio_min).round() as u32,
+            )
+        } else if in_ratio > self.ratio_max {
+            (
+                (img_height as f64 * self.ratio_max).round() as u32,
+                img_height,
+            )
+        } else {
+            (img_width, img_height)
+        };
+
+        let left = (img_width - w) / 2;
+        let top = (img_height - h) / 2;
+        Ok((left, top, w, h))
+    }
+
+    fn to_fir_algorithm(&self) -> fir::ResizeAlg {
+        match self.filter {
+            FilterType::Nearest => fir::ResizeAlg::Nearest,
+            FilterType::Triangle => fir::ResizeAlg::Convolution(fir::FilterType::Bilinear),
+            FilterType::CatmullRom => fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom),
+            FilterType::Gaussian => fir::ResizeAlg::Convolution(fir::FilterType::Gaussian),
+            FilterType::Lanczos3 => fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3),
+        }
+    }
+}
+
+impl Transform<DynamicImage, DynamicImage> for RandomResizedCrop {
+    fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
+        let (img_width, img_height) = img.dimensions();
+        let (left, top, crop_width, crop_height) = self.get_params(img_width, img_height)?;
+
+        // Crop the selected region
+        let cropped = img.crop_imm(left, top, crop_width, crop_height);
+
+        // Convert to RGB and prepare for fast resize
+        let rgb = cropped.to_rgb8();
+        let src = fir::images::Image::from_vec_u8(
+            crop_width,
+            crop_height,
+            rgb.into_raw(),
+            fir::PixelType::U8x3,
+        )?;
+
+        // Resize to target dimensions
+        let mut dst = fir::images::Image::new(self.width, self.height, src.pixel_type());
+        let mut resizer = fir::Resizer::new();
+        let options = fir::ResizeOptions::new().resize_alg(self.to_fir_algorithm());
+
+        resizer.resize(&src, &mut dst, &options)?;
+
+        // Convert back to DynamicImage
+        let buffer = ImageBuffer::from_raw(self.width, self.height, dst.buffer().to_vec())
+            .ok_or_else(|| anyhow::anyhow!("Failed to create output image buffer"))?;
+
+        Ok(DynamicImage::ImageRgb8(buffer))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +612,16 @@ mod tests {
         let large_crop = CenterCrop::new(150, 150, Some([255, 0, 0]))?;
         let padded = large_crop.apply(img)?;
         assert_eq!(padded.dimensions(), (150, 150));
+        Ok(())
+    }
+
+    #[test]
+    fn test_random_resized_crop() -> Result<()> {
+        init_worker_rng(0, 0, 42);
+        let img = test_gradient_image(100, 100);
+        let crop = RandomResizedCrop::new(64, 64)?;
+        let cropped = crop.apply(img)?;
+        assert_eq!(cropped.dimensions(), (64, 64));
         Ok(())
     }
 
