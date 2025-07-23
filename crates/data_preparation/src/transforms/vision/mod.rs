@@ -36,5 +36,5 @@ pub mod photometric;
 
 pub use augmentation::RandomHorizontalFlip;
 pub use conversion::ToTensor;
-pub use geometric::Resize;
+pub use geometric::{EnsureRGB, RandomCrop, Resize};
 pub use photometric::Normalize;

@@ -3,6 +3,7 @@
 //! Provides a thread-local worker ID that allows workers to identify themselves
 //! for debugging, error messages, and task distribution.
 
+use anyhow::{anyhow, Result};
 use rand::rngs::StdRng;
 use rand::Rng as _;
 use rand::SeedableRng;
@@ -43,5 +44,24 @@ pub fn worker_gen_bool(p: f64) -> bool {
             Some(rng) => rng.random_bool(p),
             None => rand::rng().random_bool(p),
         }
+    })
+}
+
+/// Generate a random value in the specified range using the worker RNG.
+/// Returns an error if the worker RNG is not initialized.
+pub fn worker_gen_range<T, R>(range: R) -> Result<T>
+where
+    T: rand::distr::uniform::SampleUniform,
+    R: rand::distr::uniform::SampleRange<T>,
+{
+    WORKER_RNG.with(|rng| {
+        let mut rng_ref = rng.borrow_mut();
+        let rng = rng_ref.as_mut().ok_or_else(|| {
+            anyhow!(
+            "Worker RNG not initialized. This transform must be used within a DataLoader context \
+            or after calling init_worker_rng()."
+        )
+        })?;
+        Ok(rng.random_range(range))
     })
 }
