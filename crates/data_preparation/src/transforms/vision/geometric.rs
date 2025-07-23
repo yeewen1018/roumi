@@ -384,9 +384,10 @@ impl Transform<DynamicImage, DynamicImage> for CenterCrop {
     }
 }
 
-/// ===========================================================================
-/// RandomResizedCrop
-/// ===========================================================================
+// ===========================================================================
+// RandomResizedCrop
+// ===========================================================================
+
 /// Randomly crops a region from the image and resizes it to the target size.
 ///
 /// # Parameters
@@ -558,6 +559,259 @@ impl Transform<DynamicImage, DynamicImage> for RandomResizedCrop {
     }
 }
 
+// ============================================================================
+// RandomRotation
+// ============================================================================
+
+/// Randomly rotates an image within a specified degree range.
+///
+/// # Parameters
+/// - `degrees`: Range of degrees to select from. If a single number, range will be (-degrees, +degrees)
+/// - `interpolation`: Pixel interpolation method (default: Nearest)
+/// - `expand`: Whether to expand output to fit entire rotated image (default: false)
+/// - `center`: Custom rotation center as (x, y). Default is image center.
+/// - `fill`: Pixel fill value for areas outside the original image (default: black)
+///
+/// # Example
+/// ```ignore
+/// // Basic ±30 degree rotation
+/// let rotation = RandomRotation::new(30.0)?;
+///
+/// // Custom range with bilinear interpolation
+/// let rotation = RandomRotation::with_range(-90.0, 45.0)?
+///     .with_interpolation(InterpolationMode::Bilinear)
+///     .with_expand(true)
+///     .with_fill(vec![255.0, 0.0, 0.0]); // Red fill
+/// ```
+#[derive(Debug, Clone)]
+pub struct RandomRotation {
+    min_degrees: f32,
+    max_degrees: f32,
+    interpolation: InterpolationMode,
+    expand: bool,
+    center: Option<(f32, f32)>,
+    fill: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum InterpolationMode {
+    /// Nearest neighbour (fastest, lower quality)
+    Nearest,
+    /// Bilinear interpolation (slower, higher quality)
+    Bilinear,
+}
+
+impl RandomRotation {
+    /// Create rotation with symmetric range [-degrees, +degrees]
+    pub fn new(degrees: f32) -> Result<Self> {
+        ensure!(
+            degrees >= 0.0,
+            "Degrees must be non-negative for symmetric range (got {})",
+            degrees
+        );
+        Ok(Self {
+            min_degrees: -degrees,
+            max_degrees: degrees,
+            interpolation: InterpolationMode::Nearest,
+            expand: false,
+            center: None,
+            fill: vec![0.0],
+        })
+    }
+
+    /// Create rotation with custom range [min_degrees, max_degrees]
+    pub fn with_range(min_degrees: f32, max_degrees: f32) -> Result<Self> {
+        ensure!(
+            min_degrees <= max_degrees,
+            "Min degrees must be <= max degrees (got [{}, {}])",
+            min_degrees,
+            max_degrees
+        );
+        Ok(Self {
+            min_degrees,
+            max_degrees,
+            interpolation: InterpolationMode::Nearest,
+            expand: false,
+            center: None,
+            fill: vec![0.0],
+        })
+    }
+
+    /// Set interpolation method for pixel sampling.
+    pub fn with_interpolation(mut self, mode: InterpolationMode) -> Self {
+        self.interpolation = mode;
+        self
+    }
+
+    /// Set whether to expand output canvas to fit the entire rotated image.
+    pub fn with_expand(mut self, expand: bool) -> Self {
+        self.expand = expand;
+        self
+    }
+
+    /// Set center of rotation (default is image center)
+    pub fn with_center(mut self, center: (f32, f32)) -> Self {
+        self.center = Some(center);
+        self
+    }
+
+    /// Set fill value for areas outside the original image.
+    /// Accepts single value (grayscale) or RGB array.
+    pub fn with_fill(mut self, fill: impl Into<Vec<f32>>) -> Self {
+        self.fill = fill.into();
+        self
+    }
+
+    fn rotate_image(&self, img: &DynamicImage, angle: f32) -> Result<DynamicImage> {
+        let rgb = img.to_rgb8();
+        let (width, height) = (rgb.width() as f32, rgb.height() as f32);
+        let (center_x, center_y) = self.center.unwrap_or((width / 2.0, height / 2.0));
+
+        // Convert to radians
+        let theta = angle.to_radians();
+        let cos_theta = theta.cos();
+        let sin_theta = theta.sin();
+
+        // 1. Calculate output size
+        let (new_width, new_height, offset_x, offset_y) = if self.expand {
+            // Calculate bounds of rotated corners
+            let corners = [
+                (0.0 - center_x, 0.0 - center_y),
+                (width - center_x, 0.0 - center_y),
+                (0.0 - center_x, height - center_y),
+                (width - center_x, height - center_y),
+            ];
+
+            let mut min_x: f32 = 0.0;
+            let mut max_x: f32 = 0.0;
+            let mut min_y: f32 = 0.0;
+            let mut max_y: f32 = 0.0;
+
+            for (x, y) in corners.iter() {
+                let x_rot = x * cos_theta - y * sin_theta;
+                let y_rot = x * sin_theta + y * cos_theta;
+                min_x = min_x.min(x_rot);
+                max_x = max_x.max(x_rot);
+                min_y = min_y.min(y_rot);
+                max_y = max_y.max(y_rot);
+            }
+
+            let new_width = (max_x - min_x).ceil() as u32;
+            let new_height = (max_y - min_y).ceil() as u32;
+            let offset_x = -min_x + (new_width as f32 - width) / 2.0;
+            let offset_y = -min_y + (new_height as f32 - height) / 2.0;
+
+            (new_width, new_height, offset_x, offset_y)
+        } else {
+            (width as u32, height as u32, 0.0, 0.0)
+        };
+
+        // 2. Get fill values
+        let fill_rgb = if self.fill.len() == 1 {
+            // Single value for all channels
+            let val = (self.fill[0].clamp(0.0, 255.0)) as u8;
+            [val, val, val]
+        } else if self.fill.len() >= 3 {
+            // Per-channel values
+            [
+                (self.fill[0].clamp(0.0, 255.0)) as u8,
+                (self.fill[1].clamp(0.0, 255.0)) as u8,
+                (self.fill[2].clamp(0.0, 255.0)) as u8,
+            ]
+        } else {
+            return Err(anyhow!(
+                "Fill must be single value or have at least 3 values for RGB"
+            ));
+        };
+
+        // 3. Create output image
+        let mut rotated = ImageBuffer::from_pixel(new_width, new_height, Rgb(fill_rgb));
+
+        // Rotation parameters
+        let new_center_x = center_x + offset_x;
+        let new_center_y = center_y + offset_y;
+        let cos_neg = (-theta).cos();
+        let sin_neg = (-theta).sin();
+
+        // Inverse mapping: for each output pixel, find corresponding input pixel
+        for y in 0..new_height {
+            for x in 0..new_width {
+                let dx = x as f32 - new_center_x;
+                let dy = y as f32 - new_center_y;
+
+                let src_x = dx * cos_neg - dy * sin_neg + center_x;
+                let src_y = dx * sin_neg + dy * cos_neg + center_y;
+
+                // Apply interpolation
+                match self.interpolation {
+                    InterpolationMode::Nearest => {
+                        let src_x_round = src_x.round() as i32;
+                        let src_y_round = src_y.round() as i32;
+
+                        if src_x_round >= 0
+                            && src_x_round < width as i32
+                            && src_y_round >= 0
+                            && src_y_round < height as i32
+                        {
+                            let pixel = rgb.get_pixel(src_x_round as u32, src_y_round as u32);
+                            rotated.put_pixel(x, y, *pixel);
+                        }
+                    }
+                    InterpolationMode::Bilinear => {
+                        if src_x >= 0.0
+                            && src_x < width - 1.0
+                            && src_y >= 0.0
+                            && src_y < height - 1.0
+                        {
+                            let x0 = src_x.floor() as u32;
+                            let y0 = src_y.floor() as u32;
+                            let x1 = (x0 + 1).min(rgb.width() - 1);
+                            let y1 = (y0 + 1).min(rgb.height() - 1);
+
+                            let fx = src_x - x0 as f32;
+                            let fy = src_y - y0 as f32;
+
+                            let p00 = rgb.get_pixel(x0, y0);
+                            let p01 = rgb.get_pixel(x0, y1);
+                            let p10 = rgb.get_pixel(x1, y0);
+                            let p11 = rgb.get_pixel(x1, y1);
+
+                            let interpolated = Rgb([
+                                (p00[0] as f32 * (1.0 - fx) * (1.0 - fy)
+                                    + p10[0] as f32 * fx * (1.0 - fy)
+                                    + p01[0] as f32 * (1.0 - fx) * fy
+                                    + p11[0] as f32 * fx * fy)
+                                    .round() as u8,
+                                (p00[1] as f32 * (1.0 - fx) * (1.0 - fy)
+                                    + p10[1] as f32 * fx * (1.0 - fy)
+                                    + p01[1] as f32 * (1.0 - fx) * fy
+                                    + p11[1] as f32 * fx * fy)
+                                    .round() as u8,
+                                (p00[2] as f32 * (1.0 - fx) * (1.0 - fy)
+                                    + p10[2] as f32 * fx * (1.0 - fy)
+                                    + p01[2] as f32 * (1.0 - fx) * fy
+                                    + p11[2] as f32 * fx * fy)
+                                    .round() as u8,
+                            ]);
+
+                            rotated.put_pixel(x, y, interpolated);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(DynamicImage::ImageRgb8(rotated))
+    }
+}
+
+impl Transform<DynamicImage, DynamicImage> for RandomRotation {
+    fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
+        let angle = worker_gen_range(self.min_degrees..=self.max_degrees)?;
+        self.rotate_image(&img, angle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +967,49 @@ mod tests {
             .with_padding(CropPadding::Uniform(10))
             .with_pad_if_needed(true);
         assert_eq!(complex.apply(small_img)?.dimensions(), (60, 60));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_random_rotation() -> Result<()> {
+        init_worker_rng(0, 0, 42);
+        let img = test_gradient_image(100, 100);
+
+        // Basic functionality and randomness
+        let rotation = RandomRotation::new(45.0)?;
+        let rotated = rotation.apply(img.clone())?;
+        assert_eq!(rotated.dimensions(), (100, 100));
+
+        // Verify different angles produce different results
+        let results: Vec<_> = (0..3)
+            .map(|_| {
+                let rotated = rotation.apply(img.clone()).unwrap();
+                let rgb = rotated.to_rgb8();
+                *rgb.get_pixel(25, 25)
+            })
+            .collect();
+        let unique_count = results
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(unique_count > 1, "Should produce varied rotations");
+
+        // Expansion test
+        let expand_rotation = RandomRotation::with_range(45.0, 45.0)?.with_expand(true);
+        let expanded = expand_rotation.apply(img.clone())?;
+        assert!(expanded.width() > 100, "Expansion should increase size");
+
+        // Zero rotation preserves image
+        let no_rotation = RandomRotation::new(0.0)?;
+        assert!(image_equals(&img, &no_rotation.apply(img.clone())?));
+
+        // Fill color test
+        let red_fill = RandomRotation::new(45.0)?.with_fill(vec![255.0, 0.0, 0.0]);
+        let filled = red_fill.apply(img)?;
+        let filled_rgb = filled.to_rgb8();
+        let corner = filled_rgb.get_pixel(0, 0);
+        assert_eq!(corner.0, [255, 0, 0]);
 
         Ok(())
     }
