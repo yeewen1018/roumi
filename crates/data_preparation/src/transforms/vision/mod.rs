@@ -32,9 +32,11 @@
 pub mod augmentation;
 pub mod conversion;
 pub mod geometric;
+pub mod io;
 pub mod photometric;
 
 pub use augmentation::RandomHorizontalFlip;
 pub use conversion::ToTensor;
 pub use geometric::{CenterCrop, EnsureRGB, RandomCrop, RandomResizedCrop, RandomRotation, Resize};
+pub use io::{LoadImage, LoadImageToSample};
 pub use photometric::{ColorJitter, Normalize};
