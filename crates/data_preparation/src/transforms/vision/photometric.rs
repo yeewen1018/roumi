@@ -2,7 +2,9 @@ use crate::dataloader::worker_gen_range;
 use crate::transforms::Transform;
 use anyhow::{ensure, Context, Result};
 use image::DynamicImage;
-use tch::Tensor;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use tch::{Kind, Tensor};
 
 // ===========================================================================
 // ColorJitter
@@ -314,7 +316,17 @@ impl Transform<DynamicImage, DynamicImage> for ColorJitter {
 // Normalize
 // ============================================================================
 
+thread_local! {
+    /// Thread-local cache for normalization tensors.
+    /// Each DataLoader worker thread gets its own cache to avoid lock contention.
+    /// Key: (num_channels, kind) -> (mean_tensor, std_tensor)
+    static NORM_CACHE: RefCell<HashMap<(i64, Kind), (Tensor, Tensor)>> = RefCell::new(HashMap::new());
+}
+
 /// Normalizes tensors using channel-wise statistics.
+///
+/// Caches normalization tensors per thread to avoid repeated allocations
+/// when processing many tensors with the same shape and data type.
 ///
 /// # Arguments:
 /// - `mean`: per-channel means
@@ -349,6 +361,13 @@ impl Normalize {
             mean.len(),
             std.len()
         );
+
+        // Validate std values are not zero to avoid division by zero
+        ensure!(
+            std.iter().all(|&s| s > 0.0),
+            "Standard deviation values must be positive"
+        );
+
         Ok(Self {
             mean: mean.to_vec(),
             std: std.to_vec(),
@@ -362,6 +381,42 @@ impl Normalize {
             std: vec![0.229, 0.224, 0.225],
         }
     }
+
+    /// Get or create cached normalization tensors for the given channels and data type.
+    fn get_norm_tensors(&self, num_channels: i64, kind: Kind) -> Result<(Tensor, Tensor)> {
+        ensure!(
+            num_channels as usize == self.mean.len(),
+            "Channel count mismatch: input has {} channels but normalization expects {}",
+            num_channels,
+            self.mean.len()
+        );
+
+        NORM_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let key = (num_channels, kind);
+
+            // Return cached tensors if available
+            if let Some((mean_t, std_t)) = cache.get(&key) {
+                return Ok((mean_t.shallow_clone(), std_t.shallow_clone()));
+            }
+
+            // Create new tensors if not in cache
+            let mean_t = Tensor::from_slice(&self.mean)
+                .reshape(&[num_channels, 1, 1])
+                .to_kind(kind);
+
+            let std_t = Tensor::from_slice(&self.std)
+                .reshape(&[num_channels, 1, 1])
+                .to_kind(kind);
+
+            // Cache for future use (limit cache size to prevent unbounded growth)
+            if cache.len() < 8 {
+                cache.insert(key, (mean_t.shallow_clone(), std_t.shallow_clone()));
+            }
+
+            Ok((mean_t, std_t))
+        })
+    }
 }
 
 impl Transform<Tensor, Tensor> for Normalize {
@@ -370,24 +425,27 @@ impl Transform<Tensor, Tensor> for Normalize {
             .size3()
             .context("Input must be 3D tensor [C, H, W]")?;
 
-        ensure!(
-            num_channels as usize == self.mean.len(),
-            "Channel count mismatch: input has {} channels but normalization expects {} ",
-            num_channels,
-            self.mean.len()
-        );
+        // Get cached or create new normalization tensors
+        let (mean_t, std_t) = self.get_norm_tensors(num_channels, tensor.kind())?;
 
-        let mean_t = Tensor::from_slice(&self.mean)
-            .reshape(&[num_channels, 1, 1])
-            .to_kind(tensor.kind());
-
-        let std_t = Tensor::from_slice(&self.std)
-            .reshape(&[num_channels, 1, 1])
-            .to_kind(tensor.kind());
-
+        // Apply normalization
         Ok((tensor - mean_t) / std_t)
     }
 }
+
+/// Clear the thread-local normalization cache.
+///
+/// Useful for tests or when switching between very different workloads
+/// with different tensor shapes/types.
+pub fn clear_normalize_cache() {
+    NORM_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    })
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -420,6 +478,107 @@ mod tests {
             let channel_mean = normalized.select(0, c).mean(Kind::Float);
             assert!(channel_mean.double_value(&[]) < 1e-5);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_caching() -> Result<()> {
+        // Clear cache from any previous tests
+        clear_normalize_cache();
+
+        let norm = Normalize::imagenet();
+
+        // First call should populate cache
+        let tensor1 = Tensor::ones(&[3, 32, 32], (Kind::Float, Device::Cpu));
+        let _ = norm.apply(tensor1)?;
+
+        // Verify cache was populated
+        NORM_CACHE.with(|cache| {
+            assert_eq!(cache.borrow().len(), 1);
+        });
+
+        // Second call with same size should use cache
+        let tensor2 = Tensor::ones(&[3, 32, 32], (Kind::Float, Device::Cpu));
+        let _ = norm.apply(tensor2)?;
+
+        // Cache size should remain the same
+        NORM_CACHE.with(|cache| {
+            assert_eq!(cache.borrow().len(), 1);
+        });
+
+        // Different kind should create new entry
+        let tensor3 = Tensor::ones(&[3, 32, 32], (Kind::Double, Device::Cpu));
+        let _ = norm.apply(tensor3)?;
+
+        NORM_CACHE.with(|cache| {
+            assert_eq!(cache.borrow().len(), 2);
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_imagenet_values() -> Result<()> {
+        let norm = Normalize::imagenet();
+
+        // Test with ones
+        let tensor = Tensor::ones(&[3, 2, 2], (Kind::Float, Device::Cpu));
+        let result = norm.apply(tensor)?;
+
+        // Check each channel has correct normalization
+        let expected_values = [
+            (1.0 - 0.485) / 0.229, // R channel
+            (1.0 - 0.456) / 0.224, // G channel
+            (1.0 - 0.406) / 0.225, // B channel
+        ];
+
+        for (c, &expected) in expected_values.iter().enumerate() {
+            let channel = result.select(0, c as i64);
+            let actual = channel.double_value(&[0, 0]);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "Channel {} mismatch: expected {}, got {}",
+                c,
+                expected,
+                actual
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_thread_local_cache() -> Result<()> {
+        use std::thread;
+
+        // Each thread should have its own cache
+        let norm = Normalize::imagenet();
+
+        let handle = thread::spawn(move || {
+            clear_normalize_cache();
+
+            // This thread's cache should start empty
+            NORM_CACHE.with(|cache| {
+                assert_eq!(cache.borrow().len(), 0);
+            });
+
+            // Populate this thread's cache
+            let tensor = Tensor::ones(&[3, 16, 16], (Kind::Float, Device::Cpu));
+            let _ = norm.apply(tensor).unwrap();
+
+            NORM_CACHE.with(|cache| {
+                assert_eq!(cache.borrow().len(), 1);
+            });
+        });
+
+        handle.join().unwrap();
+
+        // Main thread's cache should be independent
+        NORM_CACHE.with(|cache| {
+            // Could be 0 or more depending on other tests
+            let _ = cache.borrow().len(); // Just verify it doesn't panic
+        });
+
         Ok(())
     }
 
