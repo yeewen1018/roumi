@@ -12,6 +12,7 @@
 //! ├── photometric.rs   → Color and appearance (brightness, contrast, normalize)  
 //! ├── conversion.rs    → Format conversions (image → tensor)
 //! ├── augmentation.rs  → Pure data augmentation (flip, noise, etc.)
+//! └── io.rs           → Image loading utilities
 //! ```
 //!
 //! # Quick Start
