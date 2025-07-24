@@ -25,8 +25,13 @@ impl Transform<DynamicImage, DynamicImage> for EnsureRGB {
 // Resize
 // ============================================================================
 
-/// Resizes an image to the specified dimension while preserving
-/// the aspect ratio. Users must specify the filter type.
+/// Resizes an image to the specified dimension.
+///
+/// Supports two resize modes:
+/// - **Aspect-preserving**: Resize shorter edge to target size (maintains aspect ratio)
+/// - **Exact dimensions**: Resize to specified widthxheight (may distort image).
+///
+/// Users must specify the filter type.
 ///
 /// # Filter Types
 /// - `Nearest`: Nearest neighbour, fastest
@@ -38,37 +43,119 @@ impl Transform<DynamicImage, DynamicImage> for EnsureRGB {
 /// # Examples
 /// ``` ignore
 /// # use image::imageops::FilterType;
-/// let resize = Resize::new(256, 256, FilterType::Triangle)?;
-/// let img = load_image("cat.jpg")?;
-/// let resized = resize.apply(img)?;
+///
+/// // Aspect-preserving resize: shorter edge becomes 256px
+/// let resize = Resize::new(256, FilterType::Triangle)?;
+/// // 1000x800 image -> 320x256 image (aspect ratio preserved)
+///
+/// // Exact dimensions: resize to specified size (may distort)
+/// let resize = Resize::new((224, 224), FilterType::Triangle)?;
+/// // 1000x800 image -> 224x224 image (aspect ratio may change)
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Resize {
-    width: u32,
-    height: u32,
+    size: Size,
     filter: FilterType,
 }
 
+// Resize target specification
+#[derive(Debug, Clone)]
+pub enum Size {
+    /// Resize shorter edge to this size (preserves aspect ratio)
+    Single(u32),
+    /// Resize to exact dimensions (may change aspect ratio)
+    Tuple(u32, u32),
+}
+
+impl From<u32> for Size {
+    fn from(size: u32) -> Self {
+        Size::Single(size)
+    }
+}
+
+impl From<(u32, u32)> for Size {
+    fn from((width, height): (u32, u32)) -> Self {
+        Size::Tuple(width, height)
+    }
+}
+
 impl Resize {
-    /// Creates a new Resize transform.
-    pub fn new(width: u32, height: u32, filter: FilterType) -> Result<Self> {
-        ensure!(
-            width > 0 && height > 0,
-            "Image dimensions must be positive after resizing (got {}x{})",
-            width,
-            height
-        );
-        Ok(Self {
-            width,
-            height,
-            filter,
-        })
+    pub fn new<S: Into<Size>>(size: S, filter: FilterType) -> Result<Self> {
+        let size = size.into();
+        match &size {
+            Size::Single(s) => ensure!(*s > 0, "Size must be positive (got {})", s),
+            Size::Tuple(w, h) => ensure!(
+                *w > 0 && *h > 0,
+                "Dimensions must be positive (got {}x{})",
+                w,
+                h
+            ),
+        }
+        Ok(Self { size, filter })
+    }
+
+    /// Calculate output dimensions based on input size and resize mode.
+    fn calculate_output_size(&self, width: u32, height: u32) -> (u32, u32) {
+        match self.size {
+            Size::Single(target_size) => {
+                // Resize shorter edge to target size, scale longer edge proportionally
+                let scale = if width < height {
+                    target_size as f32 / width as f32
+                } else {
+                    target_size as f32 / height as f32
+                };
+
+                let new_width = (width as f32 * scale).round() as u32;
+                let new_height = (height as f32 * scale).round() as u32;
+                (new_width, new_height)
+            }
+            Size::Tuple(w, h) => (w, h),
+        }
+    }
+
+    /// Converts image::FilterType to fast_image_resize::ResizeAlg
+    fn to_fir_algorithm(&self) -> fir::ResizeAlg {
+        match self.filter {
+            FilterType::Nearest => fir::ResizeAlg::Nearest,
+            FilterType::Triangle => fir::ResizeAlg::Convolution(fir::FilterType::Bilinear),
+            FilterType::CatmullRom => fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom),
+            FilterType::Gaussian => fir::ResizeAlg::Convolution(fir::FilterType::Gaussian),
+            FilterType::Lanczos3 => fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3),
+        }
     }
 }
 
 impl Transform<DynamicImage, DynamicImage> for Resize {
     fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
-        Ok(img.resize(self.width, self.height, self.filter))
+        let rgb = img.to_rgb8();
+        let (src_width, src_height) = (rgb.width(), rgb.height());
+
+        // Create source image
+        let src = fir::images::Image::from_vec_u8(
+            src_width,
+            src_height,
+            rgb.into_raw(),
+            fir::PixelType::U8x3,
+        )?;
+
+        // Calculate output dimensions based on resize mode
+        let (dst_width, dst_height) = self.calculate_output_size(src_width, src_height);
+
+        // Create destination image buffer
+        let mut dst = fir::images::Image::new(dst_width, dst_height, src.pixel_type());
+
+        // Configure resizer with selected algorithm
+        let mut resizer = fir::Resizer::new();
+        let options = fir::ResizeOptions::new().resize_alg(self.to_fir_algorithm());
+
+        // Perform the resize operation
+        resizer.resize(&src, &mut dst, &options)?;
+
+        // Convert back to DynamicImage
+        let buffer = ImageBuffer::from_raw(dst_width, dst_height, dst.buffer().to_vec())
+            .ok_or_else(|| anyhow::anyhow!("Failed to create output image buffer"))?;
+
+        Ok(DynamicImage::ImageRgb8(buffer))
     }
 }
 
@@ -847,7 +934,7 @@ mod tests {
     #[test]
     fn test_resize() -> Result<()> {
         let img = test_gradient_image(100, 100);
-        let resize = Resize::new(50, 50, FilterType::Nearest)?;
+        let resize = Resize::new((50, 50), FilterType::Nearest)?;
         let resized = resize.apply(img)?;
         assert_eq!(resized.dimensions(), (50, 50));
         Ok(())

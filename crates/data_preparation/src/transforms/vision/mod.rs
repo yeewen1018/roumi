@@ -24,7 +24,7 @@
 //! use image::imageops::FilterType;
 //!
 //! // Create a typical training pipeline
-//! let pipeline = Resize::new(256, 256, FilterType::Lanczos3)?
+//! let pipeline = Resize::new((256, 256), FilterType::Lanczos3)?
 //!     .then(ToTensor)
 //!     .then(Normalize::imagenet());
 //! ```

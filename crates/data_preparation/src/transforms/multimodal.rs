@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_multimodal_pipeline() -> Result<()> {
-        let vision_pipelineline = Resize::new(2, 2, FilterType::Nearest)?
+        let vision_pipelineline = Resize::new((2, 2), FilterType::Nearest)?
             .then(ToTensor)
             .then(Normalize::imagenet())
             .then(ToSample::new("pixels"));
