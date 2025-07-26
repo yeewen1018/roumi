@@ -2,7 +2,7 @@ use crate::dataloader::worker_gen_range;
 use crate::transforms::Transform;
 use anyhow::{anyhow, ensure, Result};
 use fast_image_resize as fir;
-use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, Rgb};
+use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, Rgb, RgbImage};
 
 // ============================================================================
 // EnsureRGB
@@ -265,8 +265,8 @@ impl RandomCrop {
         self
     }
 
-    fn apply_padding(&self, img: &DynamicImage, padding: &CropPadding) -> DynamicImage {
-        let (width, height) = img.dimensions();
+    fn apply_padding(&self, img: &RgbImage, padding: &CropPadding) -> RgbImage {
+         let (width, height) = img.dimensions();
 
         let (left, top, right, bottom) = match padding {
             CropPadding::Uniform(p) => (*p, *p, *p, *p),
@@ -276,24 +276,79 @@ impl RandomCrop {
 
         let new_width = width + left + right;
         let new_height = height + top + bottom;
+        let total_pixels = (new_width * new_height) as usize;
 
-        match self.padding_mode {
-            CropPaddingMode::Constant => {
-                let mut padded = ImageBuffer::from_pixel(new_width, new_height, Rgb(self.fill));
-
-                for (x, y, pixel) in img.to_rgb8().enumerate_pixels() {
-                    padded.put_pixel(x + left, y + top, *pixel);
-                }
-
-                DynamicImage::ImageRgb8(padded)
-            }
-            _ => {
-                // TODO: Implement Edge, Reflect, Symmetric padding modes
-                todo!("Only Constant padding mode is currently implemented")
+        // Pre-allocate result buffer and fill with background color
+        let mut result_data = Vec::with_capacity(total_pixels * 3);
+        
+        // Safety: Set the length to match the capacity calculation,
+        // and then writing exactly that many bytes using copy_nonoverlapping
+        unsafe {
+            result_data.set_len(total_pixels * 3);
+            let mut write_ptr = result_data.as_mut_ptr();
+            
+            // Fill entire buffer with background color
+            for _ in 0..total_pixels {
+                std::ptr::copy_nonoverlapping(self.fill.as_ptr(), write_ptr, 3);
+                write_ptr = write_ptr.add(3);
             }
         }
+
+        // Copy original image data into the padded buffer
+        let src_data = img.as_raw();
+        let src_row_bytes = (width * 3) as usize;
+        let dst_row_bytes = (new_width * 3) as usize;
+        let copy_bytes_per_row = (width * 3) as usize;
+
+        // Safety: All buffer bounds are calculated and validated above.
+        // copy_nonoverlapping is safe because source and destination don't overlap
+        unsafe {
+            for y in 0..height {
+                let src_offset = y as usize * src_row_bytes;
+                let dst_offset = ((top + y) as usize * dst_row_bytes) + (left as usize * 3);
+
+                std::ptr::copy_nonoverlapping(
+                    src_data.as_ptr().add(src_offset),
+                    result_data.as_mut_ptr().add(dst_offset),
+                    copy_bytes_per_row,
+                );
+            }
+        }
+
+        ImageBuffer::from_raw(new_width, new_height, result_data).unwrap()
     }
 
+    /// Extracts a rectangular region from an image using optimized memory operations
+    fn extract_region(&self, img: &RgbImage, crop_left: u32, crop_top: u32) -> RgbImage {
+        let (img_width, _) = img.dimensions();
+        let src_data = img.as_raw();
+        let src_row_bytes = (img_width * 3) as usize;
+        let copy_bytes_per_row = (self.size.1 * 3) as usize;
+
+        let result_capacity = (self.size.1 * self.size.0 * 3) as usize;
+        let mut result_data: Vec<u8> = Vec::with_capacity(result_capacity);
+
+        // Safety: Set the length to match the calculated capacity and copy
+        // exactly that many bytes row by row using validated offsets
+        unsafe {
+            result_data.set_len(result_capacity);
+            
+            for y in 0..self.size.0 {
+                let src_offset = ((crop_top + y) as usize * src_row_bytes) + (crop_left as usize * 3);
+                let dst_offset = y as usize * copy_bytes_per_row;
+
+                std::ptr::copy_nonoverlapping(
+                    src_data.as_ptr().add(src_offset),
+                    result_data.as_mut_ptr().add(dst_offset),
+                    copy_bytes_per_row,
+                );
+            }
+        }
+
+        ImageBuffer::from_raw(self.size.1, self.size.0, result_data).unwrap()
+    }
+
+    /// Calculates random crop coordinates within the image bounds
     fn get_params(&self, img_width: u32, img_height: u32) -> Result<(u32, u32)> {
         let (crop_height, crop_width) = self.size;
 
@@ -327,34 +382,48 @@ impl RandomCrop {
 }
 
 impl Transform<DynamicImage, DynamicImage> for RandomCrop {
-    fn apply(&self, mut img: DynamicImage) -> Result<DynamicImage> {
+    fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
+        // Convert to RGB8 format for consistent processing
+        let mut rgb_img = match img {
+            DynamicImage::ImageRgb8(rgb) => rgb,
+            _ => img.to_rgb8(),
+        };
+
         // 1. Apply explicit padding if specified
         if let Some(ref padding) = self.padding {
-            img = self.apply_padding(&img, padding);
+            rgb_img = self.apply_padding(&rgb_img, padding);
         }
 
-        let (mut width, mut height) = img.dimensions();
+        let (mut width, mut height) = rgb_img.dimensions();
 
-        // 2. Apply automatic padding if needed
+        // 2. Apply automatic padding if needed for undersized images
         if self.pad_if_needed {
             if width < self.size.1 {
-                let padding = CropPadding::Symmetric((self.size.1 - width + 1) / 2, 0);
-                img = self.apply_padding(&img, &padding);
-                width = img.width();
+                let pad_amount = (self.size.1 - width + 1) / 2;
+                let padding = CropPadding::Symmetric(pad_amount, 0);
+                rgb_img = self.apply_padding(&rgb_img, &padding);
+                width = rgb_img.width();
             }
 
             if height < self.size.0 {
-                let padding = CropPadding::Symmetric(0, (self.size.0 - height + 1) / 2);
-                img = self.apply_padding(&img, &padding);
-                height = img.height();
+                let pad_amount = (self.size.0 - height + 1) / 2;
+                let padding = CropPadding::Symmetric(0, pad_amount);
+                rgb_img = self.apply_padding(&rgb_img, &padding);
+                height = rgb_img.height();
             }
         }
 
-        // 3. Get random crop coordinates
-        let (left, top) = self.get_params(width, height)?;
+        // 3. Calculate random crop coordinates
+        let (crop_left, crop_top) = self.get_params(width, height)?;
 
-        // 4. Crop
-        Ok(img.crop_imm(left, top, self.size.1, self.size.0))
+        // 4. Fast path: no cropping needed
+        if crop_left == 0 && crop_top == 0 && width == self.size.1 && height == self.size.0 {
+            return Ok(DynamicImage::ImageRgb8(rgb_img));
+        }
+
+        // 5. Extract the cropped region
+        let result = self.extract_region(&rgb_img, crop_left, crop_top);
+        Ok(DynamicImage::ImageRgb8(result))
     }
 }
 
