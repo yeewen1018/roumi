@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use image::{io::Reader as ImageReader, DynamicImage};
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
-use std::path::Path;
+use std::path::PathBuf;
 use tch::Tensor;
 
 // ============================================================================
@@ -41,10 +41,10 @@ impl LoadImage {
     }
 }
 
-impl Transform<&Path, DynamicImage> for LoadImage {
-    fn apply(&self, path: &Path) -> Result<DynamicImage> {
+impl Transform<PathBuf, DynamicImage> for LoadImage {
+    fn apply(&self, path: PathBuf) -> Result<DynamicImage> {
         // Open the image file
-        let file = File::open(path)
+        let file = File::open(&path)
             .with_context(|| format!("Failed to open image: {}", path.display()))?;
 
         // Get file size for buffer pre-allocation
@@ -126,15 +126,15 @@ impl<T> LoadImageToSample<T> {
     }
 }
 
-impl<T> Transform<(&Path, usize), Sample> for LoadImageToSample<T>
+impl<T> Transform<(PathBuf, usize), Sample> for LoadImageToSample<T>
 where
     T: Transform<DynamicImage, Tensor>,
 {
-    fn apply(&self, (path, label): (&Path, usize)) -> Result<Sample> {
+    fn apply(&self, (path, label): (PathBuf, usize)) -> Result<Sample> {
         // Load image
         let image = self
             .image_loader
-            .apply(path)
+            .apply(path.clone())
             .with_context(|| format!("Failed to load image: {}", path.display()))?;
 
         // Apply vision transforms: DynamicImage -> Tensor
@@ -179,7 +179,7 @@ mod tests {
 
         // Test basic image loading
         let loader = LoadImage::new();
-        let loaded_image = loader.apply(temp_file.path())?;
+        let loaded_image = loader.apply(temp_file.path().to_path_buf())?;
 
         // Verify image properties
         assert_eq!(
@@ -219,7 +219,7 @@ mod tests {
         // Test the ML-ready loader
         let loader = LoadImageToSample::new(pipeline);
         let test_label = 42;
-        let sample = loader.apply((temp_file.path(), test_label))?;
+        let sample = loader.apply((temp_file.path().to_path_buf(), test_label))?;
 
         // Verify Sample structure
         assert!(sample.get("image").is_ok(), "Should have 'image' feature");
@@ -249,13 +249,13 @@ mod tests {
         let loader = LoadImage::new();
 
         // Test LoadImage error handling
-        let result = loader.apply(Path::new("nonexistent.jpg"));
+        let result = loader.apply(PathBuf::from("nonexistent.jpg"));
         assert!(result.is_err(), "Should error for non-existent file");
 
         // Test LoadImageToSample error handling
         let pipeline = ToTensor;
         let ml_loader = LoadImageToSample::new(pipeline);
-        let result = ml_loader.apply((Path::new("nonexistent.jpg"), 0));
+        let result = ml_loader.apply((PathBuf::from("nonexistent.jpg"), 0));
         assert!(result.is_err(), "Should error for non-existent file");
 
         Ok(())
