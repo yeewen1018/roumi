@@ -401,72 +401,126 @@ impl CenterCrop {
             pad_value: pad_value.unwrap_or([0, 0, 0]),
         })
     }
+
+    /// Efficiently fills buffer with the background colour 
+    fn fill_background(&self, buffer: &mut [u8]) {
+        let pad_value = self.pad_value;
+
+        // Fill RGB triplets efficiently
+        let pixel_count = buffer.len() / 3;
+        for i in 0..pixel_count {
+            let offset = i * 3;
+            buffer[offset] = pad_value[0];
+            buffer[offset + 1] = pad_value[1];
+            buffer[offset + 2] = pad_value[2];
+        }
+    }
+
+    /// Copies a rectangular region between image buffers 
+    fn copy_image_region(&self, src: &[u8], dst: &mut [u8], 
+                        src_stride: usize, dst_stride: usize,
+                        copy_width: u32, copy_height: u32,
+                        src_x: u32, src_y: u32, dst_x: u32, dst_y: u32) {
+        let bytes_per_row = (copy_width * 3) as usize;
+        
+        for y in 0..copy_height {
+            let src_offset = ((src_y + y) as usize * src_stride) + (src_x as usize * 3);
+            let dst_offset = ((dst_y + y) as usize * dst_stride) + (dst_x as usize * 3);
+            
+            // Safety: Both slices are pre-validated to have sufficient capacity,
+            // and copy_nonoverlapping is the standard way to efficiently copy memory
+            // when source and destination don't overlap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(src_offset),
+                    dst.as_mut_ptr().add(dst_offset),
+                    bytes_per_row,
+                );
+            }
+        }
+    }
 }
 
 impl Transform<DynamicImage, DynamicImage> for CenterCrop {
     fn apply(&self, img: DynamicImage) -> Result<DynamicImage> {
-        let (img_width, img_height) = img.dimensions();
+        // Ensure we're working with RGB8 format
+        let rgb_img = match img {
+            DynamicImage::ImageRgb8(rgb) => rgb,
+            _ => img.to_rgb8(),
+        };
 
-        // Direct crop if image is large enough
-        if img_width >= self.width && img_height >= self.height {
-            let left = (img_width - self.width) / 2;
-            let top = (img_height - self.height) / 2;
-            return Ok(img.crop_imm(left, top, self.width, self.height));
+        let (img_width, img_height) = rgb_img.dimensions();
+
+        // Fast path: exact size match - no processing needed
+        if img_width == self.width && img_height == self.height {
+            return Ok(DynamicImage::ImageRgb8(rgb_img));
         }
 
-        // Create padded result buffer
-        let mut result = ImageBuffer::from_pixel(self.width, self.height, Rgb(self.pad_value));
+        // Optimized path: crop only (no padding needed)
+        if img_width >= self.width && img_height >= self.height {
+            let crop_left = (img_width - self.width) / 2;
+            let crop_top = (img_height - self.height) / 2;
+            
+            let mut result_buffer = Vec::with_capacity((self.width * self.height * 3) as usize);
+            let src_data = rgb_img.as_raw();
+            let src_row_bytes = (img_width * 3) as usize;
+            let copy_bytes_per_row = (self.width * 3) as usize;
+            
+            // Copy rows directly for better cache efficiency
+            for y in 0..self.height {
+                let src_offset = ((crop_top + y) as usize * src_row_bytes) + (crop_left as usize * 3);
+                result_buffer.extend_from_slice(&src_data[src_offset..src_offset + copy_bytes_per_row]);
+            }
+            
+            let result = ImageBuffer::from_raw(self.width, self.height, result_buffer).unwrap();
+            return Ok(DynamicImage::ImageRgb8(result));
+        }
 
-        // Calculate positioning
-        let paste_x = if img_width < self.width {
-            (self.width - img_width) / 2
-        } else {
-            0
-        };
+        // General case: padding required before cropping
+        let mut result_buffer = vec![0u8; (self.width * self.height * 3) as usize];
+        
+        // Fill with background color
+        self.fill_background(&mut result_buffer);
 
-        let paste_y = if img_height < self.height {
-            (self.height - img_height) / 2
-        } else {
-            0
-        };
-
-        // Calculate the region to copy from the source image
+        // Calculate region to copy
         let copy_width = img_width.min(self.width);
         let copy_height = img_height.min(self.height);
 
-        let src_x = if img_width > self.width {
-            (img_width - self.width) / 2
-        } else {
-            0
-        };
+        if copy_width > 0 && copy_height > 0 {
+            // Calculate source region (center of source image)
+            let src_x = if img_width > self.width { 
+                (img_width - self.width) / 2 
+            } else { 
+                0 
+            };
+            let src_y = if img_height > self.height { 
+                (img_height - self.height) / 2 
+            } else { 
+                0 
+            };
+            
+            // Calculate destination position (center of result image)
+            let dst_x = if img_width < self.width { 
+                (self.width - img_width) / 2 
+            } else { 
+                0 
+            };
+            let dst_y = if img_height < self.height { 
+                (self.height - img_height) / 2 
+            } else { 
+                0 
+            };
 
-        let src_y = if img_height > self.height {
-            (img_height - self.height) / 2
-        } else {
-            0
-        };
-
-        // Copy pixels efficiently
-        match img {
-            DynamicImage::ImageRgb8(ref rgb_img) => {
-                for y in 0..copy_height {
-                    for x in 0..copy_width {
-                        let pixel = rgb_img.get_pixel(src_x + x, src_y + y);
-                        result.put_pixel(paste_x + x, paste_y + y, *pixel);
-                    }
-                }
-            }
-            _ => {
-                let rgb_img = img.to_rgb8();
-                for y in 0..copy_height {
-                    for x in 0..copy_width {
-                        let pixel = rgb_img.get_pixel(src_x + x, src_y + y);
-                        result.put_pixel(paste_x + x, paste_y + y, *pixel);
-                    }
-                }
-            }
+            // Copy the image region efficiently
+            self.copy_image_region(
+                rgb_img.as_raw(), &mut result_buffer,
+                (img_width * 3) as usize, (self.width * 3) as usize,
+                copy_width, copy_height, 
+                src_x, src_y, dst_x, dst_y
+            );
         }
 
+        let result = ImageBuffer::from_raw(self.width, self.height, result_buffer).unwrap();
         Ok(DynamicImage::ImageRgb8(result))
     }
 }
