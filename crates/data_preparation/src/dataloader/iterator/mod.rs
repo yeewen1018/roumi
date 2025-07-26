@@ -235,7 +235,7 @@ where
                 num_workers,
             } => {
                 // Keep the pipeline full up to `prefetch_factor`
-                while *pending_tasks < config.prefetch_factor {
+                while *pending_tasks < (config.prefetch_factor * *num_workers) {
                     match batch_indices.next() {
                         Some(indices) => {
                             // Deterministic round-robin assignment
@@ -295,7 +295,9 @@ where
                 batch_index,
             } => {
                 // Keep the pipeline full up to `prefetch_factor`
-                while *pending_tasks < config.prefetch_factor && !*batches_exhausted {
+                while *pending_tasks < (config.prefetch_factor * *num_workers)
+                    && !*batches_exhausted
+                {
                     match batch_indices.next() {
                         Some(indices) => {
                             // Send batch to workers via shared channel (load balanced)

@@ -69,7 +69,7 @@ impl InMemoryWorkerManager {
     {
         // Create steal queue if using workers
         let steal_queue = if num_workers > 0 {
-            let capacity = num_workers * config.prefetch_factor;
+            let capacity = num_workers * config.prefetch_factor * config.batch_size.unwrap() / 2;
             let (tx, rx) = bounded(capacity);
             Some((tx, rx))
         } else {
