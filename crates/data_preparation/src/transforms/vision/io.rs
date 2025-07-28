@@ -1,11 +1,12 @@
 use crate::sample::Sample;
 use crate::transforms::Transform;
 use anyhow::{Context, Result};
-use image::{io::Reader as ImageReader, DynamicImage};
+use image::{io::Reader as ImageReader, DynamicImage, RgbImage};
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::PathBuf;
 use tch::Tensor;
+use turbojpeg::{Decompressor, Image, PixelFormat};
 
 // ============================================================================
 // LoadImage - Base image loader
@@ -39,33 +40,96 @@ impl LoadImage {
     pub fn new() -> Self {
         Self { buffer_size: 8192 }
     }
-}
 
-impl Transform<PathBuf, DynamicImage> for LoadImage {
-    fn apply(&self, path: PathBuf) -> Result<DynamicImage> {
-        // Open the image file
-        let file = File::open(&path)
+    /// Loads JPEG files using TurboJPEG for maximum performance.
+    fn load_jpeg_optimized(&self, path: &PathBuf) -> Result<DynamicImage> {
+        // Read file into buffer
+        let mut file =
+            File::open(path).with_context(|| format!("Failed to open JPEG: {}", path.display()))?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)
+            .with_context(|| format!("Failed to read JPEG: {}", path.display()))?;
+
+        // Create TurboJPEG decompressor
+        let mut decompressor =
+            Decompressor::new().with_context(|| "Failed to create TurboJPEG decompressor")?;
+
+        // Get image dimensions
+        let header = decompressor
+            .read_header(&buffer)
+            .with_context(|| format!("Failed to read JPEG header: {}", path.display()))?;
+
+        let width = header.width;
+        let height = header.height;
+
+        // Create output buffer for RGB data (3 bytes per pixel)
+        let mut rgb_data = vec![0u8; (width * height * 3) as usize];
+        let output_image = Image {
+            pixels: rgb_data.as_mut_slice(),
+            width: width as usize,
+            height: height as usize,
+            format: PixelFormat::RGB,
+            pitch: (width * 3) as usize,
+        };
+
+        // Decompress JPEG into our buffer (this is the fast part!)
+        decompressor
+            .decompress(&buffer, output_image)
+            .with_context(|| format!("Failed to decompress JPEG: {}", path.display()))?;
+
+        // Convert to RgbImage
+        let rgb_image = RgbImage::from_raw(width as u32, height as u32, rgb_data)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create RGB image from TurboJPEG data"))?;
+
+        Ok(DynamicImage::ImageRgb8(rgb_image))
+    }
+
+    /// Loads non-JPEG images using the standard `image` crate.
+    ///
+    /// This handles PNG, WebP, TIFF, and other non-JPEG formats.
+    fn load_standard_format(&self, path: &PathBuf) -> Result<DynamicImage> {
+        let file = File::open(path)
             .with_context(|| format!("Failed to open image: {}", path.display()))?;
 
-        // Get file size for buffer pre-allocation
         let file_size = file.metadata()?.len() as usize;
-
-        // Use buffered reader with configured buffer size
         let mut reader = BufReader::with_capacity(self.buffer_size, file);
-
-        // Pre-allocate buffer based on file size to minimize reallocations
         let mut buffer = Vec::with_capacity(file_size);
         reader
             .read_to_end(&mut buffer)
             .with_context(|| format!("Failed to read image: {}", path.display()))?;
 
-        // Decode image from memory buffer
         let image = ImageReader::new(Cursor::new(buffer))
             .with_guessed_format()?
             .decode()
             .with_context(|| format!("Failed to decode image: {}", path.display()))?;
 
         Ok(image)
+    }
+
+    /// Detects JPEG files by extension for optimal decoder routing.
+    fn is_jpeg_file(path: &PathBuf) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map_or(false, |extension| {
+                matches!(extension.to_lowercase().as_str(), "jpg" | "jpeg")
+            })
+    }
+}
+
+impl Transform<PathBuf, DynamicImage> for LoadImage {
+    fn apply(&self, path: PathBuf) -> Result<DynamicImage> {
+        if Self::is_jpeg_file(&path) {
+            self.load_jpeg_optimized(&path).or_else(|turbo_error| {
+                eprintln!(
+                    "TurboJPEG failed for {}, falling back to standard decoder: {}",
+                    path.display(),
+                    turbo_error
+                );
+                self.load_standard_format(&path)
+            })
+        } else {
+            self.load_standard_format(&path)
+        }
     }
 }
 
