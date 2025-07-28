@@ -15,7 +15,7 @@ use image::{DynamicImage, ImageBuffer, RgbImage};
 /// let flip = RandomHorizontalFlip::new(0.5)?; // 50% flip chance
 /// let augmented = flip.apply(image)?;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RandomHorizontalFlip {
     p: f64,
 }

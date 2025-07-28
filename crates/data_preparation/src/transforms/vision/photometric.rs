@@ -344,7 +344,7 @@ thread_local! {
 /// let norm = Normalize::imagenet();
 /// let normalized = norm.apply(tensor)?;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Normalize {
     mean: Vec<f32>,
     std: Vec<f32>,
