@@ -521,26 +521,17 @@ impl ComponentBenchmarks {
         let paths = &self.sample_paths[..num_samples];
         let mut times = Vec::new();
 
-        let max_size = paths
-            .iter()
-            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-            .max()
-            .unwrap_or(0) as usize;
-        let mut buffer = vec![0u8; max_size];
-
         // Warmup
         for path in &paths[..10] {
-            let mut file = File::open(path)?;
-            let _ = file.read(&mut buffer)?;
+            let _ = std::fs::read(path)?; // Simple, reads entire file
         }
 
         let mut total_bytes = 0u64;
         for path in paths {
             let start = Instant::now();
-            let mut file = File::open(path)?;
-            let bytes_read = file.read(&mut buffer)?;
+            let data = std::fs::read(path)?;
             times.push(start.elapsed().as_secs_f64());
-            total_bytes += bytes_read as u64;
+            total_bytes += data.len() as u64;
         }
 
         let times_ms: Vec<f64> = times.iter().map(|t| t * 1000.0).collect();
@@ -1178,7 +1169,7 @@ impl TransformPipelineBenchmark {
         let bytes_gb = bytes_per_batch as f64 / 1e9;
 
         let transfer_bandwidth_gbps = if transfer_stats.contains_key("median") {
-            bytes_gb / (transfer_stats["median"] / 1000.0)
+            bytes_gb / (transfer_stats["median"])
         } else {
             0.0
         };
@@ -1199,9 +1190,9 @@ impl TransformPipelineBenchmark {
         }
 
         // Calculate efficiency metrics
-        let dataload_median = dataload_stats.get("median").unwrap_or(&0.0) * 1000.0;
-        let transfer_median = transfer_stats.get("median").unwrap_or(&0.0) * 1000.0;
-        let compute_median = compute_stats.get("median").unwrap_or(&0.0) * 1000.0;
+        let dataload_median = dataload_stats.get("median").unwrap_or(&0.0);
+        let transfer_median = transfer_stats.get("median").unwrap_or(&0.0);
+        let compute_median = compute_stats.get("median").unwrap_or(&0.0);
         let total_median = dataload_median + transfer_median + compute_median;
 
         let gpu_efficiency = if total_median > 0.0 {
@@ -1231,10 +1222,10 @@ impl TransformPipelineBenchmark {
             gpu_util_percent: avg_util,
             gpu_memory_mb: avg_mem,
             gpu_memory_peak_mb: peak_mem,
-            dataload_time_ms: dataload_median,
-            transfer_time_ms: transfer_median,
-            compute_time_ms: compute_median,
-            total_time_ms: total_median,
+            dataload_time_ms: dataload_median * 1000.0,
+            transfer_time_ms: transfer_median * 1000.0,
+            compute_time_ms: compute_median * 1000.0,
+            total_time_ms: total_median * 1000.0,
             gpu_efficiency,
             pipeline_efficiency,
             transfer_bandwidth_gbps,
@@ -1353,9 +1344,15 @@ fn run_benchmark(data_root: PathBuf, output_file: &str) -> Result<()> {
         println!("Transform Level: {}", level_name);
         println!("{}", "=".repeat(60));
 
-        let mut single_threaded_time: Option<f64> = None;
+        let mut baselines: HashMap<usize, f64> = HashMap::new();
 
         for (batch_size, num_workers) in &configs {
+            let baseline_for_this_batch = if *num_workers == 0 {
+                None
+            } else {
+                baselines.get(batch_size).copied()
+            };
+
             match pipeline_bench.benchmark_pipeline(
                 level_name,
                 transform_creator.as_ref(),
@@ -1363,11 +1360,13 @@ fn run_benchmark(data_root: PathBuf, output_file: &str) -> Result<()> {
                 *num_workers,
                 num_batches,
                 warmup_batches,
-                single_threaded_time,
+                baseline_for_this_batch,
+                //single_threaded_time,
             ) {
                 Ok(result) => {
                     if *num_workers == 0 {
-                        single_threaded_time = Some(result.avg_batch_ms / 1000.0);
+                        baselines.insert(*batch_size, result.avg_batch_ms / 1000.0);
+                        //            single_threaded_time = Some(result.avg_batch_ms / 1000.0);
                     }
                     report.pipeline_results.push(result);
                 }

@@ -237,28 +237,17 @@ impl ComponentBenchmarks {
         let paths = &self.sample_paths[..num_samples];
         let mut times = Vec::new();
 
-        // Pre-allocate buffer based on max file size
-        let max_size = paths
-            .iter()
-            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-            .max()
-            .unwrap_or(0) as usize;
-        let mut buffer = vec![0u8; max_size];
-
         // Warmup
         for path in &paths[..10] {
-            let mut file = File::open(path)?;
-            let _ = file.read(&mut buffer)?;
+            let _ = std::fs::read(path)?; // Simple, reads entire file
         }
 
-        // Benchmark with pre-allocated buffer
         let mut total_bytes = 0u64;
         for path in paths {
             let start = Instant::now();
-            let mut file = File::open(path)?;
-            let bytes_read = file.read(&mut buffer)?;
+            let data = std::fs::read(path)?;
             times.push(start.elapsed().as_secs_f64());
-            total_bytes += bytes_read as u64;
+            total_bytes += data.len() as u64;
         }
 
         let times_ms: Vec<f64> = times.iter().map(|t| t * 1000.0).collect();
