@@ -70,12 +70,12 @@ mod tests {
         sample::Sample,
         transforms::Transform,
     };
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result};
     use tokenizers::tokenizer::Tokenizer;
 
     fn load_tokenizer() -> Result<Tokenizer> {
-        Tokenizer::from_file("src/tokenizer.json")
-            .map_err(|e| anyhow!("Failed to load tokenizer: {}", e))
+        Tokenizer::from_pretrained("bert-base-uncased", None)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer from pretrained: {}", e))
     }
 
     #[test]
