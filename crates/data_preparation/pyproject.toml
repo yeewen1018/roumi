@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pyo3-dataloader"
+description = "High-performance data loading library with zero-copy Python integration"
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = [
+    "torch==2.2.0",
+]
+
+[tool.maturin]
+module-name = "roumi"
+features = ["python"]
