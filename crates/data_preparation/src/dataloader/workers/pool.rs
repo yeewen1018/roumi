@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use super::COMPLETION_TIMEOUT_MS;
 use crate::dataloader::common::thread::WORKER_ID;
 
 /// Thread pool for parallel data loading.
@@ -41,8 +42,7 @@ use crate::dataloader::common::thread::WORKER_ID;
 /// - `Output`: Results returned from workers
 pub(crate) struct WorkerPool<Task, Output> {
     pub(crate) workers: Vec<thread::JoinHandle<()>>,
-    pub(crate) task_tx: Option<Sender<Task>>, // For shared channel mode
-    pub(crate) worker_task_txs: Option<Vec<Sender<Task>>>, // For deterministic mode
+    pub(crate) worker_task_txs: Vec<Sender<Task>>,
     pub(crate) output_rx: Receiver<Output>,
     pub(crate) shutdown: Arc<AtomicBool>,
 }
@@ -52,39 +52,11 @@ where
     Task: Send + 'static,
     Output: Send + 'static,
 {
-    /// Creates a new worker pool with shared task channel.
-    ///
-    /// Workers pull from a single queue. Best when deterministic task distribution
-    /// is already handled at a higher level (e.g., pre-sharded data sources).
-    pub(crate) fn new<F>(num_workers: usize, buffer_size: usize, worker_fn: F) -> Result<Self>
-    where
-        F: Fn(Receiver<Task>, Sender<Output>, Arc<AtomicBool>) + Send + Sync + 'static,
-    {
-        Self::create(num_workers, buffer_size, worker_fn, false)
-    }
-
     /// Creates a new worker pool with per-worker channels.
     ///
     /// Tasks are routed to specific workers by the main thread. Ensures
     /// consistent worker assignment for reproducible random transforms.
-    pub(crate) fn new_deterministic<F>(
-        num_workers: usize,
-        buffer_size: usize,
-        worker_fn: F,
-    ) -> Result<Self>
-    where
-        F: Fn(Receiver<Task>, Sender<Output>, Arc<AtomicBool>) + Send + Sync + 'static,
-    {
-        Self::create(num_workers, buffer_size, worker_fn, true)
-    }
-
-    /// Internal creation method that handles both modes
-    fn create<F>(
-        num_workers: usize,
-        buffer_size: usize,
-        worker_fn: F,
-        deterministic: bool,
-    ) -> Result<Self>
+    pub(crate) fn new<F>(num_workers: usize, buffer_size: usize, worker_fn: F) -> Result<Self>
     where
         F: Fn(Receiver<Task>, Sender<Output>, Arc<AtomicBool>) + Send + Sync + 'static,
     {
@@ -103,29 +75,18 @@ where
             ));
         }
 
-        // Setup channels based on mode
-        let (task_tx, worker_task_txs, task_receivers) = if deterministic {
-            let mut txs = Vec::with_capacity(num_workers);
-            let mut rxs = Vec::with_capacity(num_workers);
+        // Create per-worker channels
+        let mut worker_task_txs = Vec::with_capacity(num_workers);
+        let mut task_receivers = Vec::with_capacity(num_workers);
 
-            for _ in 0..num_workers {
-                let (tx, rx) = bounded(buffer_size);
-                txs.push(tx);
-                rxs.push(rx);
-            }
-
-            (None, Some(txs), rxs)
-        } else {
+        for _ in 0..num_workers {
             let (tx, rx) = bounded(buffer_size);
-            let rxs = vec![rx; num_workers];
-            (Some(tx), None, rxs)
-        };
+            worker_task_txs.push(tx);
+            task_receivers.push(rx);
+        }
 
-        let output_buffer_size = if deterministic {
-            buffer_size * num_workers
-        } else {
-            buffer_size
-        };
+        // Create shared output channel
+        let output_buffer_size = buffer_size * num_workers;
         let (output_tx, output_rx) = bounded(output_buffer_size);
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -151,11 +112,27 @@ where
 
         Ok(Self {
             workers,
-            task_tx,
             worker_task_txs,
             output_rx,
             shutdown,
         })
+    }
+
+    /// Wait for all workers to finish processing their current tasks
+    pub(crate) fn wait_for_completion(&self) -> Result<()> {
+        // Close all worker channels to signal completion
+        for tx in &self.worker_task_txs {
+            drop(tx.clone());
+        }
+
+        // Drain any remaining outputs
+        while let Ok(_) = self
+            .output_rx
+            .recv_timeout(std::time::Duration::from_millis(COMPLETION_TIMEOUT_MS))
+        {
+            // Discard remaining outputs
+        }
+        Ok(())
     }
 }
 
@@ -164,13 +141,8 @@ impl<Task, Output> Drop for WorkerPool<Task, Output> {
         // Signal shutdown to all workers
         self.shutdown.store(true, Ordering::Relaxed);
 
-        // Drop all task senders to close channels
-        self.task_tx.take();
-
         // Also drop per-worker channels if they exist
-        if let Some(mut worker_txs) = self.worker_task_txs.take() {
-            worker_txs.clear(); // Drops all senders
-        }
+        self.worker_task_txs.clear();
 
         // Wait for workers to finish
         for worker in self.workers.drain(..) {

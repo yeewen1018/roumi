@@ -85,13 +85,13 @@ mod tests {
 
     #[test]
     fn test_multimodal_pipeline() -> Result<()> {
-        let vision_pipelineline = Resize::new(2, 2, FilterType::Nearest)?
+        let vision_pipelineline = Resize::new((2, 2), FilterType::Nearest)?
             .then(ToTensor)
             .then(Normalize::imagenet())
             .then(ToSample::new("pixels"));
 
-        let tokenizer = Tokenizer::from_file("src/tokenizer.json")
-            .map_err(|e| anyhow::anyhow!("Tokenizer error: {}", e))?;
+        let tokenizer = Tokenizer::from_pretrained("bert-base-uncased", None)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer from pretrained: {}", e))?;
         let text_pipelineline = Tokenize::new(tokenizer);
 
         // Create multimodal pipeline

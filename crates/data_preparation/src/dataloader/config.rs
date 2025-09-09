@@ -48,6 +48,8 @@ pub struct DataLoaderConfig {
     pub worker_timeout: Duration,
     /// Whether to reuse workers across iterations
     pub persistent_workers: bool,
+    /// Whether to use pinned memory for CUDA data transfer.
+    pub pin_memory: bool,
 }
 
 impl Default for DataLoaderConfig {
@@ -62,6 +64,7 @@ impl Default for DataLoaderConfig {
             timeout: Duration::from_secs(30),
             worker_timeout: Duration::from_millis(100),
             persistent_workers: false,
+            pin_memory: false,
         }
     }
 }
@@ -141,6 +144,13 @@ impl DataLoaderConfigBuilder {
     /// Enable persistent workers that survive across iterations.
     pub fn persistent_workers(mut self, persistent: bool) -> Self {
         self.config.persistent_workers = persistent;
+        self
+    }
+
+    /// Sets whether to use pinned memory for faster GPU transfers.
+    /// Only effective when CUDA is available.
+    pub fn pin_memory(mut self, pin_memory: bool) -> Self {
+        self.config.pin_memory = pin_memory;
         self
     }
 

@@ -185,8 +185,7 @@ impl IterableWorkerManager {
 
         let pool = WorkerPool {
             workers,
-            task_tx: None, // Persistent workers use control_senders instead
-            worker_task_txs: None,
+            worker_task_txs: vec![],
             output_rx,
             shutdown,
         };

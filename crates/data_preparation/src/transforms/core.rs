@@ -89,6 +89,18 @@ where
     }
 }
 
+// Implement Transform for Box<dyn Transform> to allow boxed transforms to be used directly
+// This enables storing trait objects and calling .apply() without manual dereferencing
+impl<I, O> Transform<I, O> for Box<dyn Transform<I, O> + Send + Sync>
+where
+    I: Send,
+    O: Send,
+{
+    fn apply(&self, input: I) -> Result<O> {
+        (**self).apply(input)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

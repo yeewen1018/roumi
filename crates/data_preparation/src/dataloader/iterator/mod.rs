@@ -60,6 +60,7 @@ struct IteratorConfig<'a, C> {
     prefetch_factor: usize,
     runtime_seed: Option<u64>,
     epoch: usize,
+    pin_memory: bool,
 }
 
 /// Iterator over batches of data.
@@ -207,9 +208,17 @@ where
                                 indices.len()
                             )))
                         } else {
-                            Some(config.collator.collate(&samples).with_context(|| {
-                                format!("Collation failed for {} samples", samples.len())
-                            }))
+                            let batch_result =
+                                config.collator.collate(&samples).with_context(|| {
+                                    format!("Collation failed for {} samples", samples.len())
+                                });
+
+                            let final_batch = if config.pin_memory {
+                                batch_result.map(|batch| batch.pin_memory())
+                            } else {
+                                batch_result
+                            };
+                            Some(final_batch)
                         }
                     }
                     Err(e) => Some(Err(e)),
@@ -226,15 +235,17 @@ where
                 num_workers,
             } => {
                 // Keep the pipeline full up to `prefetch_factor`
-                while *pending_tasks < config.prefetch_factor {
+                while *pending_tasks < (config.prefetch_factor * *num_workers) {
                     match batch_indices.next() {
                         Some(indices) => {
                             // Deterministic round-robin assignment
                             let assigned_worker = *batch_index % *num_workers;
 
-                            if let Err(e) =
-                                worker_manager.send_task_to_worker(assigned_worker, indices)
-                            {
+                            if let Err(e) = worker_manager.send_task_to_worker(
+                                assigned_worker,
+                                indices,
+                                config.epoch,
+                            ) {
                                 return Some(Err(e.context(format!(
                                     "Failed to send batch {} to worker {}",
                                     *batch_index, assigned_worker
@@ -262,6 +273,10 @@ where
                         )))),
                     }
                 } else {
+                    // No more pending tasks - ensure workers have finished
+                    if let Err(e) = worker_manager.wait_for_completion() {
+                        eprintln!("Warning: Failed to wait for worker completion: {}", e);
+                    }
                     None // All batches consumed
                 }
             }
@@ -280,14 +295,18 @@ where
                 batch_index,
             } => {
                 // Keep the pipeline full up to `prefetch_factor`
-                while *pending_tasks < config.prefetch_factor && !*batches_exhausted {
+                while *pending_tasks < (config.prefetch_factor * *num_workers)
+                    && !*batches_exhausted
+                {
                     match batch_indices.next() {
                         Some(indices) => {
                             // Send batch to workers via shared channel (load balanced)
                             let worker_id = *batch_index % *num_workers;
                             *batch_index += 1;
 
-                            if let Err(e) = worker_manager.send_task_to_worker(worker_id, indices) {
+                            if let Err(e) =
+                                worker_manager.send_task_to_worker(worker_id, indices, config.epoch)
+                            {
                                 return Some(Err(e));
                             }
                             *pending_tasks += 1;
@@ -325,7 +344,8 @@ where
                 // Send end-of-epoch signals to all workers
                 else if !*sentinels_sent && *batches_exhausted {
                     for i in 0..*num_workers {
-                        if let Err(e) = worker_manager.send_task_to_worker(i, vec![]) {
+                        if let Err(e) = worker_manager.send_task_to_worker(i, vec![], config.epoch)
+                        {
                             return Some(Err(e));
                         }
                     }
@@ -389,12 +409,20 @@ where
                 if samples.is_empty() || (config.drop_last && samples.len() < config.batch_size) {
                     None
                 } else {
-                    Some(config.collator.collate(&samples).with_context(|| {
+                    let batch_result = config.collator.collate(&samples).with_context(|| {
                         format!(
                             "Failed to collate streaming batch of {} samples",
                             samples.len()
                         )
-                    }))
+                    });
+
+                    let final_batch = if config.pin_memory {
+                        batch_result.map(|batch| batch.pin_memory())
+                    } else {
+                        batch_result
+                    };
+
+                    Some(final_batch)
                 }
             }
 
@@ -437,15 +465,22 @@ where
                     None
                 } else {
                     let batch_end = sample_buffer.len().min(config.batch_size);
-                    let batch: Vec<_> = sample_buffer.drain(0..batch_end).collect();
+                    let samples: Vec<_> = sample_buffer.drain(0..batch_end).collect();
 
-                    Some(config.collator.collate(&batch)
-                        .with_context(|| format!(
-                            "Failed to collate streaming batch of {} samples (expected batch_size: {})",
-                            batch.len(),
-                            config.batch_size
-                        ))
-                    )
+                    let batch_result = config.collator.collate(&samples).with_context(|| {
+                        format!(
+                            "Failed to collate streaming batch of {} samples",
+                            samples.len()
+                        )
+                    });
+
+                    let final_batch = if config.pin_memory {
+                        batch_result.map(|batch| batch.pin_memory())
+                    } else {
+                        batch_result
+                    };
+
+                    Some(final_batch)
                 }
             }
 
@@ -534,11 +569,19 @@ where
                 } else {
                     // Create and return batch
                     let batch_end = sample_buffer.len().min(config.batch_size);
-                    let batch: Vec<_> = sample_buffer.drain(0..batch_end).collect();
+                    let samples: Vec<_> = sample_buffer.drain(0..batch_end).collect();
 
-                    Some(config.collator.collate(&batch).with_context(|| {
-                        format!("Failed to collate batch of {} samples", batch.len())
-                    }))
+                    let batch_result = config.collator.collate(&samples).with_context(|| {
+                        format!("Failed to collate batch of {} samples", samples.len())
+                    });
+
+                    let final_batch = if config.pin_memory {
+                        batch_result.map(|batch| batch.pin_memory())
+                    } else {
+                        batch_result
+                    };
+
+                    Some(final_batch)
                 }
             }
         }
