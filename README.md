@@ -1,8 +1,16 @@
 # roumi
-Rust libraries for Oumi
+Roumi is an open-source ecosystem of Rust libraries designed to address critical systems-level bottlenecks in large-scale machine learning.
 
-This is a repository for Oumi's Rust libraries. It will hopefully grow substantially in the near future, but for now there is a grpo_rewards crate that calculates rewards based on completion length. There is a main.rs in the crates directory for an example of how to call it from rust and a python example in the examples directory for how to call it from python.
+**Note:** This is my active development fork of [`oumi-ai/roumi`](https://github.com/oumi-ai/roumi). 
 
+---
+
+## Project Highlights
+This repository contains several key components, including:
+
+* **A `data_preparation` crate** that provides a high-performance data loading framework. This component bypasses Python's GIL to achieve **up to 5.3x the throughput** and a **7x memory reduction** compared to PyTorch's standard DataLoader. This work was submitted to the NeurIPS ML for Systems Workshop, 2025.
+
+* **A `grpo_rewards` crate** that calculates rewards for GRPO pipelines, achieving a **3x speedup** over Python baselines for CPU-bound tasks.
 
 ## Prerequisites
 
