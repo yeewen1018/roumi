@@ -114,8 +114,7 @@ static MODULE_CACHE: RwLock<Option<HashMap<String, PyObject>>> = RwLock::new(Non
 /// Get cached PyTorch module, importing only once per process.
 ///
 /// This is called on every tensor conversion from PyCapsule to PyTorch tensor.
-/// Profiling shows import overhead dominates conversion time without caching,
-/// while cached imports achieve near-zero overhead for repeated conversions.
+/// Profiling shows import overhead dominates conversion time without caching.
 pub fn get_torch_module(py: Python) -> PyResult<PyObject> {
     // Fast path: check cache first (read-only lock)
     {
