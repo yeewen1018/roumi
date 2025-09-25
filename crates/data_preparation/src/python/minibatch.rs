@@ -87,19 +87,17 @@ impl PyMiniBatch {
     }
 }
 
-/// Create a test MiniBatch for testing purposes 
+/// Create a test MiniBatch for testing purposes
 #[pyfunction]
 pub fn create_test_batch() -> PyResult<PyMiniBatch> {
-    let input_ids = Tensor::from_slice(&[1i64, 2, 3, 4])
-        .reshape(&[2, 2]);
-    let labels = Tensor::from_slice(&[0i64, 1])
-        .reshape(&[2, 1]);
+    let input_ids = Tensor::from_slice(&[1i64, 2, 3, 4]).reshape(&[2, 2]);
+    let labels = Tensor::from_slice(&[0i64, 1]).reshape(&[2, 1]);
 
     let mut tensors = std::collections::HashMap::new();
     tensors.insert("input_ids".to_string(), input_ids);
     tensors.insert("labels".to_string(), labels);
 
-    let batch = MiniBatch{tensors};
+    let batch = MiniBatch { tensors };
 
     PyMiniBatch::from_minibatch(batch)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
