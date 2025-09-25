@@ -149,13 +149,10 @@ pub fn get_torch_module(py: Python) -> PyResult<PyObject> {
 /// Context for DLPack tensor cleanup
 ///
 /// Holds an additional Arc reference to keep tensor memory alive during the
-/// DLPack handoff to Python. Also stores shape/strides vectors that DLPack
-/// will reference via raw pointers.
-#[allow(dead_code)]
+/// DLPack handoff to Python.
 struct DLPackContext {
+    #[allow(dead_code)]
     tensor: Arc<Tensor>,
-    shape: Vec<i64>,   // Referenced by DLTensor.shape pointer
-    strides: Vec<i64>, // Referenced by DLTensor.strides pointer
 }
 
 /// DLPack cleanup callback - automatically called when PyTorch releases the tensor.
@@ -351,10 +348,6 @@ impl PyTensorHandle {
         let stride_elements = tensor.stride();
         let ndim = shape.len() as i32;
 
-        let element_size = self.get_element_size(tensor.kind())?;
-
-        let strides: Vec<i64> = stride_elements.iter().map(|&s| s * element_size).collect();
-
         // Convert Rust tensor properties to DLPack format
         let dl_device = self.convert_device_to_dlpack(tensor.device())?;
         let dl_dtype = self.convert_dtype_to_dlpack(tensor.kind())?;
@@ -362,8 +355,6 @@ impl PyTensorHandle {
         // Create context to keep everything alive
         let context = DLPackContext {
             tensor: Arc::new(tensor),
-            shape: shape.clone(),
-            strides: strides.clone(),
         };
 
         let shape_ptr = Box::leak(shape.into_boxed_slice()).as_mut_ptr();
@@ -387,26 +378,6 @@ impl PyTensorHandle {
         };
 
         Ok(managed_tensor)
-    }
-
-    /// Get element size in bytes for stride calculation
-    fn get_element_size(&self, kind: Kind) -> Result<i64> {
-        let size = match kind {
-            Kind::Bool | Kind::Uint8 | Kind::Int8 => 1,
-            Kind::Int16 | Kind::Half => 2,
-            Kind::Int | Kind::Float => 4,
-            Kind::Int64 | Kind::Double => 8,
-            Kind::ComplexHalf => 4,
-            Kind::ComplexFloat => 8,
-            Kind::ComplexDouble => 16,
-            _ => {
-                return Err(anyhow!(
-                    "Unsupported tensor type for size calculation: {:?}",
-                    kind
-                ))
-            }
-        };
-        Ok(size)
     }
 
     /// Wrap DLPack structure in Python capsule for safe transport to PyTorch.
